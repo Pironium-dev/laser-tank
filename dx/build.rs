@@ -1,7 +1,6 @@
 use std::path::Path;
 
 fn main() {
-    embuild::espidf::sysenv::output();
     println!("cargo:rerun-if-changed=../.env");
     if let Ok(d) = dotenvy::from_path_iter(Path::new("../.env")) {
         for i in d {

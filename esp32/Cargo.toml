@@ -45,3 +45,4 @@ esp-idf-svc = "0.51"
 
 [build-dependencies]
 embuild = "0.33"
+dotenvy = "0.15"
