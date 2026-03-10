@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "communication",
-    "dx", "dx",
+    "dx",
+    "esp32",
 ]
 resolver = "3"
