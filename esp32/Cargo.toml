@@ -2,9 +2,7 @@
 name = "esp32"
 version = "0.1.0"
 authors = ["Pironium-dev <pirogurama@gmail.com>"]
-edition = "2021"
-resolver = "2"
-rust-version = "1.77"
+edition = "2024"
 
 [[bin]]
 name = "esp32"
