@@ -1,21 +1,61 @@
 [package]
-name = "esp32"
-version = "0.1.0"
-authors = ["Pironium <94836916+Pironium-dev@users.noreply.github.com>"]
-edition = "2024"
+edition      = "2024"
+name         = "esp32"
+rust-version = "1.88"
+version      = "0.1.0"
 
 [[bin]]
 name = "esp32"
-harness = false # do not use the built-in cargo test harness -> resolve rust-analyzer errors
+path = "./src/bin/main.rs"
 
 [dependencies]
-log = "0.4"
-esp-idf-svc = { version = "0.52.1", features = ["critical-section", "embassy-time-driver", "embassy-sync"] }
-# Remove `generic-queue-8` if you plan to use `embassy-time` WITH `embassy-executor`
-embassy-time = { version = "0.5" }
+esp-hal = { version = "~1.0", features = ["esp32", "unstable"] }
+
+esp-rtos = { version = "0.2.0", features = [
+  "embassy",
+  "esp-alloc",
+  "esp-radio",
+  "esp32",
+] }
+
+esp-bootloader-esp-idf = { version = "0.4.0", features = ["esp32"] }
+
+embassy-net = { version = "0.7.1", features = [
+  "dhcpv4",
+  "medium-ethernet",
+  "tcp",
+  "udp",
+] }
+embedded-io = "0.7.1"
+embedded-io-async = "0.7.0"
+esp-alloc = "0.9.0"
+# for more networking protocol support see https://crates.io/crates/edge-net
+embassy-executor = { version = "0.9.1", features = [] }
+embassy-time = "0.5.0"
+esp-radio = { version = "0.17.0", features = [
+  "esp-alloc",
+  "esp32",
+  "smoltcp",
+  "unstable",
+  "wifi",
+] }
+smoltcp = { version = "0.12.0", default-features = false, features = [
+  "medium-ethernet",
+  "multicast",
+  "proto-dhcpv4",
+  "proto-dns",
+  "proto-ipv4",
+  "socket-dns",
+  "socket-icmp",
+  "socket-raw",
+  "socket-tcp",
+  "socket-udp",
+] }
+
+critical-section = "1.2.0"
+static_cell      = "2.1.1"
 embassy-futures = "0.1.2"
-embassy-executor = { version = "0.9.1", features = ["arch-std"] }
+communication = { version = "0.1.0", path = "../communication" }
 
 [build-dependencies]
-embuild = "0.33"
 dotenvy = "0.15.7"
