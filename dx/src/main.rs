@@ -1,7 +1,7 @@
-use communication::communication::ControllerState;
+use communication::communication::{ControllerState, FromServerData};
 use dioxus::prelude::*;
 use gilrs;
-use postcard::{experimental::max_size::MaxSize, to_slice};
+use postcard::{experimental::max_size::MaxSize, to_slice_cobs};
 use std::sync::{Arc, Mutex};
 use tokio::{self, io::AsyncWriteExt, net, time};
 
@@ -61,43 +61,64 @@ async fn main() {
             env!("INTERVAL").parse().unwrap(),
         ));
 
+        const BUFFER_SIZE: usize = FromServerData::POSTCARD_MAX_SIZE + 2;
+
+        let mut buf_1p = [0; BUFFER_SIZE];
+        let mut buf_2p = [0; BUFFER_SIZE];
+
         loop {
             tokio::select! {
-                Ok(i) = listener.accept() => {
+                Ok(mut i) = listener.accept() => {
                     println!("{:?}", &i);
                     if stream_1p.is_none(){
+                        i.0.write_all(dbg!(&mut to_slice_cobs(&FromServerData::SetID(1), &mut buf_1p).unwrap())).await.unwrap();
                         stream_1p = Some(i.0);
                     } else if stream_2p.is_none() {
+                        i.0.write_all(&mut to_slice_cobs(&FromServerData::SetID(2), &mut buf_2p).unwrap()).await.unwrap();
                         stream_2p = Some(i.0);
                     } else {
                         println!("?違う人が入ってきたようだ、、、?")
                     }
                 },
                 _ = interval.tick() => {
-                    let mut buf_1p = [0;ControllerState::POSTCARD_MAX_SIZE];
-                    let mut buf_2p = [0;ControllerState::POSTCARD_MAX_SIZE];
+
+                    let data_1p;
+                    let data_2p;
 
                     {
                         let mut controller_1p = controller_1p.lock().unwrap();
                         let mut controller_2p = controller_2p.lock().unwrap();
-                        
-                        to_slice(&*controller_1p, &mut buf_1p).unwrap();
-                        to_slice(&*controller_2p, &mut buf_2p).unwrap();
+
+                        data_1p = to_slice_cobs(&FromServerData::Controller(*controller_1p), &mut buf_1p).unwrap();
+                        data_2p = to_slice_cobs(&FromServerData::Controller(*controller_1p), &mut buf_2p).unwrap();
 
                         controller_1p.shot = false;
                         controller_2p.shot = false;
                     }
 
                     if let Some(ref mut stream) = stream_1p {
-                        let _ = stream.write_all(&buf_1p).await;
+                        match stream.write_all(&data_1p).await {
+                            Ok(_) => {
+                                println!("SEND_1p: {:?}", &data_1p);
+                            },
+                            Err(e) => {
+                                println!("{e}");
+                                stream_1p = None;
+                            }
+                        }
                     }
 
                     if let Some(ref mut stream) = stream_2p {
-                        let _ = stream.write_all(&buf_2p).await;
+                        match stream.write_all(&data_2p).await {
+                            Ok(_) => {
+                                println!("SEND_2p: {:?}", &data_2p);
+                            },
+                            Err(e) => {
+                                println!("{e}");
+                                stream_2p = None;
+                            }
+                        }
                     }
-
-                    println!("{:?}", controller_1p);
-
                 }
             }
         }
