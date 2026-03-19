@@ -7,7 +7,7 @@
 )]
 #![deny(clippy::large_stack_frames)]
 
-use communication::communication::{ControllerState, FromServerData};
+use communication::communication::{ControllerState, FromServerData, RobotRespond};
 use embassy_executor::Spawner;
 use embassy_futures::select::{Either3, select3};
 use embassy_net::{self, Runner, tcp};
@@ -23,7 +23,8 @@ use esp_hal::{
 use esp_println::{dbg, println};
 use esp_radio::wifi::{ClientConfig, ModeConfig};
 use esp32::motor::Motor;
-use postcard::{experimental::max_size::MaxSize, from_bytes_cobs};
+use futures::{FutureExt, Stream, task::Poll};
+use postcard::{experimental::max_size::MaxSize, from_bytes_cobs, to_slice_cobs};
 use static_cell::StaticCell;
 
 #[panic_handler]
@@ -154,6 +155,8 @@ async fn main(spawner: Spawner) -> ! {
 
     const DATA_MAX_SIZE: usize = FromServerData::POSTCARD_MAX_SIZE + 2;
 
+    let mut tx_buf = [0 as u8; RobotRespond::POSTCARD_MAX_SIZE + 2];
+
     loop {
         // バラバラになったパケットを再結合したい
         let mut data_head = 0;
@@ -163,6 +166,11 @@ async fn main(spawner: Spawner) -> ! {
             .connect(embassy_net::IpEndpoint::new(ip_address, port))
             .await
             .unwrap();
+
+        let (rx, mut tx) = socket.split();
+
+        tx.write(to_slice_cobs(&RobotRespond::SendID(robot_id), &mut tx_buf).unwrap())
+            .await;
 
         heartbeat_ticker.reset();
 
@@ -182,7 +190,7 @@ async fn main(spawner: Spawner) -> ! {
                         Ok(bites) => {
                             if bites == 0 {
                                 println!("No Connection");
-                                loop {}
+                                continue;
                             }
                             for i in buf {
                                 if i == 0 && data_head == 0 {
@@ -194,13 +202,12 @@ async fn main(spawner: Spawner) -> ! {
                                     println!("{:?}", data);
                                     data_head = 0;
                                     timeout_ticker.reset();
-                                    let data: FromServerData =
-                                        from_bytes_cobs(&mut data).unwrap();
+                                    let data: FromServerData = from_bytes_cobs(&mut data).unwrap();
                                     match data {
                                         FromServerData::Controller(state) => {
                                             motor_right.set_velocity(state.right_stick);
                                             motor_left.set_velocity(state.left_stick);
-                                        },
+                                        }
                                         FromServerData::SetID(id) => {
                                             robot_id = id;
                                             println!("{}", id);
@@ -215,7 +222,10 @@ async fn main(spawner: Spawner) -> ! {
                     }
                 }
                 Either3::Second(_) => {
-                    println!("TICK");
+                    println!("HeartBeat");
+                    socket
+                        .write(to_slice_cobs(&RobotRespond::HeartBeat, &mut tx_buf).unwrap())
+                        .await;
                 }
                 Either3::Third(_) => {
                     println!("TIMEOUT");
@@ -229,6 +239,3 @@ async fn main(spawner: Spawner) -> ! {
 async fn start_wifi(mut runner: Runner<'static, esp_radio::wifi::WifiDevice<'static>>) {
     runner.run().await;
 }
-
-/*
-}, */

@@ -6,7 +6,7 @@ pub mod communication {
     #[derive(Serialize, Deserialize, MaxSize, Debug)]
     pub enum FromServerData {
         Controller(ControllerState),
-        SetID(usize),
+        SetID(u8),
     }
 
     #[derive(Serialize, Deserialize, MaxSize, Debug, Clone, Copy)]
@@ -24,6 +24,20 @@ pub mod communication {
                 shot: false,
             }
         }
+    }
+
+    #[derive(Serialize, Deserialize, MaxSize, Debug)]
+    pub enum RobotRespond {
+        HeartBeat,
+        SendID(u8),
+        Hit,
+    }
+
+    pub const fn calc_buffer_lengh<T>() -> usize
+    where
+        T: MaxSize,
+    {
+        T::POSTCARD_MAX_SIZE + 2
     }
 }
 

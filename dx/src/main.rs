@@ -1,8 +1,12 @@
-use communication::communication::{ControllerState, FromServerData};
+use async_stream::stream;
+use communication::communication;
 use dioxus::prelude::*;
+use futures_core::Stream;
+use futures_util::StreamExt;
 use gilrs;
-use postcard::{experimental::max_size::MaxSize, to_slice_cobs};
+use postcard::{from_bytes_cobs, to_slice_cobs};
 use std::sync::{Arc, Mutex};
+use tokio::io::AsyncReadExt;
 use tokio::{self, io::AsyncWriteExt, net, time};
 
 const MAIN_CSS: Asset = asset!("/assets/main.css");
@@ -10,8 +14,8 @@ const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
 
 #[tokio::main]
 async fn main() {
-    let controller_1p = Arc::new(Mutex::new(ControllerState::new()));
-    let controller_2p = Arc::new(Mutex::new(ControllerState::new()));
+    let controller_1p = Arc::new(Mutex::new(communication::ControllerState::new()));
+    let controller_2p = Arc::new(Mutex::new(communication::ControllerState::new()));
 
     // コントローラーの入力を受け取る
     {
@@ -54,77 +58,124 @@ async fn main() {
             net::TcpListener::bind(format!("{}:{}", env!("SERVER_IP"), env!("SERVER_PORT")))
                 .await
                 .unwrap();
-        let mut stream_1p = None;
-        let mut stream_2p = None;
 
-        let mut interval = time::interval(time::Duration::from_millis(
-            env!("INTERVAL").parse().unwrap(),
-        ));
-
-        const BUFFER_SIZE: usize = FromServerData::POSTCARD_MAX_SIZE + 2;
+        const BUFFER_SIZE: usize =
+            communication::calc_buffer_lengh::<communication::FromServerData>();
 
         let mut buf_1p = [0; BUFFER_SIZE];
         let mut buf_2p = [0; BUFFER_SIZE];
 
+        let mut robot_1p: Option<tokio::task::JoinHandle<()>> = None;
+        let mut robot_2p: Option<tokio::task::JoinHandle<()>> = None;
+
         loop {
             tokio::select! {
-                Ok(mut i) = listener.accept() => {
+                // 接続を待ち、robot_*pに分ける
+                Ok(i) = listener.accept() => {
                     println!("{:?}", &i);
-                    if stream_1p.is_none(){
-                        i.0.write_all(dbg!(&mut to_slice_cobs(&FromServerData::SetID(1), &mut buf_1p).unwrap())).await.unwrap();
-                        stream_1p = Some(i.0);
-                    } else if stream_2p.is_none() {
-                        i.0.write_all(&mut to_slice_cobs(&FromServerData::SetID(2), &mut buf_2p).unwrap()).await.unwrap();
-                        stream_2p = Some(i.0);
-                    } else {
-                        println!("?違う人が入ってきたようだ、、、?")
+                    let (rx, mut tx) = i.0.into_split();
+
+                    let mut fut = Box::<_>::pin(cobs_reader(rx).await);
+
+                    match fut.next().await {
+                        None => {continue;}
+                        Some(x) => {
+                            match x {
+                                communication::RobotRespond::SendID(id) =>{
+                                    let mut flag_1p = false;
+                                    let mut flag_2p = false;
+                                    if id == 0 {
+                                        if robot_1p.is_none(){
+                                            flag_1p = true;
+                                        } else if robot_2p.is_none() {
+                                            flag_2p = true;
+                                        }
+                                    } else if id == 1{
+                                        flag_1p = true;
+                                    } else if id == 2{
+                                        flag_2p = true;
+                                    }
+                                    if flag_1p{
+                                        tx.write_all(dbg!(&mut to_slice_cobs(&communication::FromServerData::SetID(1), &mut buf_1p).unwrap())).await.unwrap();
+                                        robot_1p = Some(tokio::spawn(robot_handler(tx, fut, controller_1p.clone())));
+                                    } else if flag_2p {
+                                        tx.write_all(&mut to_slice_cobs(&communication::FromServerData::SetID(2), &mut buf_2p).unwrap()).await.unwrap();
+                                        robot_2p = Some(tokio::spawn(robot_handler(tx, fut, controller_2p.clone())));
+                                    } else {
+                                        println!("?違う人が入ってきたようだ、、、?")
+                                    }
+                                },
+                                _ => {continue;}
+                            }
+                        }
                     }
+
                 },
-                _ = interval.tick() => {
-
-                    let data_1p;
-                    let data_2p;
-
-                    {
-                        let mut controller_1p = controller_1p.lock().unwrap();
-                        let mut controller_2p = controller_2p.lock().unwrap();
-
-                        data_1p = to_slice_cobs(&FromServerData::Controller(*controller_1p), &mut buf_1p).unwrap();
-                        data_2p = to_slice_cobs(&FromServerData::Controller(*controller_1p), &mut buf_2p).unwrap();
-
-                        controller_1p.shot = false;
-                        controller_2p.shot = false;
-                    }
-
-                    if let Some(ref mut stream) = stream_1p {
-                        match stream.write_all(&data_1p).await {
-                            Ok(_) => {
-                                println!("SEND_1p: {:?}", &data_1p);
-                            },
-                            Err(e) => {
-                                println!("{e}");
-                                stream_1p = None;
-                            }
-                        }
-                    }
-
-                    if let Some(ref mut stream) = stream_2p {
-                        match stream.write_all(&data_2p).await {
-                            Ok(_) => {
-                                println!("SEND_2p: {:?}", &data_2p);
-                            },
-                            Err(e) => {
-                                println!("{e}");
-                                stream_2p = None;
-                            }
-                        }
-                    }
-                }
             }
         }
     });
 
     dioxus::launch(App);
+}
+
+async fn robot_handler(
+    mut write_stream: net::tcp::OwnedWriteHalf,
+    mut fut: impl Stream<Item = communication::RobotRespond> + std::marker::Unpin,
+    controller: Arc<Mutex<communication::ControllerState>>,
+) {
+    let mut interval = time::interval(time::Duration::from_millis(
+        env!("INTERVAL").parse().unwrap(),
+    ));
+
+    let mut buf = [0 as u8; communication::calc_buffer_lengh::<communication::FromServerData>()];
+
+    loop {
+        tokio::select! {
+            response = fut.next() => {
+                println!("{:?}", response);
+            },
+            _ = interval.tick() => {
+                let data;
+                {
+                    let controller_state = controller.lock().unwrap();
+                    data = to_slice_cobs(&communication::FromServerData::Controller(*controller_state), &mut buf).unwrap();
+                }
+                write_stream.write_all(data).await.unwrap();
+            }
+        }
+    }
+}
+
+async fn cobs_reader(
+    mut read_stream: net::tcp::OwnedReadHalf,
+) -> impl Stream<Item = communication::RobotRespond> {
+    const BUFFER_LENGTH: usize = communication::calc_buffer_lengh::<communication::RobotRespond>();
+    stream! {
+        let mut buf = [0 as u8; BUFFER_LENGTH];
+        let mut data_head = 0;
+        let mut data = [0 as u8; BUFFER_LENGTH];
+
+        loop {
+            // cobsのデコードをする
+            match read_stream.read(&mut buf).await {
+                Ok(l) => {
+                    for i in 0..l{
+                        if buf[i] == 0 && data_head == 0 {
+                            continue;
+                        }
+                        data[data_head] = buf[i];
+                        data_head += 1;
+                        if buf[i] == 0 {
+                            yield from_bytes_cobs(&mut data).unwrap();
+                            data.fill(0);
+                            data_head = 0;
+                        }
+                    }
+                },
+                Err(_) => break,
+            }
+        }
+    }
 }
 
 #[component]
