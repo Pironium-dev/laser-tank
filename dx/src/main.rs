@@ -8,6 +8,7 @@ use postcard::{from_bytes_cobs, to_slice_cobs};
 use std::sync::{Arc, Mutex};
 use tokio::io::AsyncReadExt;
 use tokio::{self, io::AsyncWriteExt, net, time};
+use tokio_util::sync::CancellationToken;
 
 const MAIN_CSS: Asset = asset!("/assets/main.css");
 const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
@@ -49,15 +50,22 @@ async fn main() {
                     },
                     _ => {}
                 }
+                println!("OK");
             }
         });
     }
 
     tokio::spawn(async move {
-        let listener =
-            net::TcpListener::bind(format!("{}:{}", env!("SERVER_IP"), env!("SERVER_PORT")))
-                .await
-                .unwrap();
+        let addr = format!("{}:{}", env!("SERVER_IP"), env!("SERVER_PORT"))
+            .parse()
+            .unwrap();
+
+        let socket = net::TcpSocket::new_v4().unwrap();
+        socket.set_reuseaddr(true).unwrap();
+        socket.set_nodelay(true).unwrap();
+        socket.bind(addr).unwrap();
+
+        let listener = socket.listen(4).unwrap();
 
         const BUFFER_SIZE: usize =
             communication::calc_buffer_lengh::<communication::FromServerData>();
@@ -67,6 +75,9 @@ async fn main() {
 
         let mut robot_1p: Option<tokio::task::JoinHandle<()>> = None;
         let mut robot_2p: Option<tokio::task::JoinHandle<()>> = None;
+
+        let mut cancel_1p = CancellationToken::new();
+        let mut cancel_2p = CancellationToken::new();
 
         loop {
             tokio::select! {
@@ -78,7 +89,7 @@ async fn main() {
                     let mut fut = Box::<_>::pin(cobs_reader(rx).await);
 
                     match fut.next().await {
-                        None => {continue;}
+                        None => {println!("None"); continue;}
                         Some(x) => {
                             match x {
                                 communication::RobotRespond::SendID(id) =>{
@@ -89,18 +100,30 @@ async fn main() {
                                             flag_1p = true;
                                         } else if robot_2p.is_none() {
                                             flag_2p = true;
+                                        } else {
+                                            flag_1p = true;
                                         }
                                     } else if id == 1{
                                         flag_1p = true;
                                     } else if id == 2{
                                         flag_2p = true;
                                     }
+                                    dbg!(flag_1p, flag_2p);
                                     if flag_1p{
-                                        tx.write_all(dbg!(&mut to_slice_cobs(&communication::FromServerData::SetID(1), &mut buf_1p).unwrap())).await.unwrap();
-                                        robot_1p = Some(tokio::spawn(robot_handler(tx, fut, controller_1p.clone())));
+                                        println!("1P");
+                                        if let Some(robot) = robot_1p {
+                                            robot.abort();
+                                            cancel_1p = CancellationToken::new();
+                                        }
+                                        tx.write_all(&mut to_slice_cobs(&communication::FromServerData::SetID(1), &mut buf_1p).unwrap()).await.unwrap();
+                                        robot_1p = Some(tokio::spawn(robot_handler(tx, fut, controller_1p.clone(), cancel_1p.child_token())));
                                     } else if flag_2p {
+                                        if let Some(robot) = robot_2p {
+                                            robot.abort();
+                                            cancel_2p = CancellationToken::new();
+                                        }
                                         tx.write_all(&mut to_slice_cobs(&communication::FromServerData::SetID(2), &mut buf_2p).unwrap()).await.unwrap();
-                                        robot_2p = Some(tokio::spawn(robot_handler(tx, fut, controller_2p.clone())));
+                                        robot_2p = Some(tokio::spawn(robot_handler(tx, fut, controller_2p.clone(), cancel_2p.child_token())));
                                     } else {
                                         println!("?違う人が入ってきたようだ、、、?")
                                     }
@@ -109,7 +132,25 @@ async fn main() {
                             }
                         }
                     }
-
+                    println!("FINISH");
+                },
+                _ = async {
+                    if let Some(robot) = robot_1p.as_mut(){
+                        robot.await
+                    } else {
+                        Ok(std::future::pending::<()>().await)
+                    }
+                } => {
+                    robot_1p = None;
+                },
+                _ = async {
+                    if let Some(robot) = robot_2p.as_mut(){
+                        robot.await
+                    } else {
+                        Ok(std::future::pending::<()>().await)
+                    }
+                } => {
+                    robot_2p = None;
                 },
             }
         }
@@ -122,17 +163,29 @@ async fn robot_handler(
     mut write_stream: net::tcp::OwnedWriteHalf,
     mut fut: impl Stream<Item = communication::RobotRespond> + std::marker::Unpin,
     controller: Arc<Mutex<communication::ControllerState>>,
+    token: CancellationToken,
 ) {
-    let mut interval = time::interval(time::Duration::from_millis(
-        env!("INTERVAL").parse().unwrap(),
-    ));
+    let duration = time::Duration::from_millis(env!("INTERVAL").parse().unwrap());
+
+    let mut interval = time::interval(duration);
+    let timeout = time::sleep(duration * 10);
+
+    tokio::pin!(timeout);
 
     let mut buf = [0 as u8; communication::calc_buffer_lengh::<communication::FromServerData>()];
+
+    dbg!(&interval);
 
     loop {
         tokio::select! {
             response = fut.next() => {
-                println!("{:?}", response);
+                timeout.as_mut().reset(tokio::time::Instant::now() + duration * 10);
+                match response {
+                    None => break,
+                    Some(_r) => {
+
+                    }
+                }
             },
             _ = interval.tick() => {
                 let data;
@@ -140,7 +193,18 @@ async fn robot_handler(
                     let controller_state = controller.lock().unwrap();
                     data = to_slice_cobs(&communication::FromServerData::Controller(*controller_state), &mut buf).unwrap();
                 }
-                write_stream.write_all(data).await.unwrap();
+                if write_stream.write_all(data).await.is_err() {
+                    println!("WRITE_ERROR");
+                    break;
+                }
+            },
+            _ = &mut timeout => {
+                println!("TIMEOUT");
+                break;
+            },
+            _ = token.cancelled() => {
+                println!("CANCELL");
+                break;
             }
         }
     }
@@ -158,6 +222,7 @@ async fn cobs_reader(
         loop {
             // cobsのデコードをする
             match read_stream.read(&mut buf).await {
+                Ok(0) => break,
                 Ok(l) => {
                     for i in 0..l{
                         if buf[i] == 0 && data_head == 0 {

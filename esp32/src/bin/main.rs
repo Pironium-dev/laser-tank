@@ -7,11 +7,11 @@
 )]
 #![deny(clippy::large_stack_frames)]
 
-use communication::communication::{ControllerState, FromServerData, RobotRespond};
+use communication::communication::{FromServerData, RobotRespond};
 use embassy_executor::Spawner;
 use embassy_futures::select::{Either3, select3};
 use embassy_net::{self, Runner, tcp};
-use embassy_time::{Duration, Ticker, with_timeout};
+use embassy_time::{Duration, Ticker, Timer, with_timeout};
 use esp_hal::{
     clock::CpuClock,
     gpio::{Level, Output, OutputConfig},
@@ -23,7 +23,6 @@ use esp_hal::{
 use esp_println::{dbg, println};
 use esp_radio::wifi::{ClientConfig, ModeConfig};
 use esp32::motor::Motor;
-use futures::{FutureExt, Stream, task::Poll};
 use postcard::{experimental::max_size::MaxSize, from_bytes_cobs, to_slice_cobs};
 use static_cell::StaticCell;
 
@@ -108,10 +107,10 @@ async fn main(spawner: Spawner) -> ! {
 
     println!("WIFI is UP");
 
+    println!("{:?}", stack.config_v4());
+
     let mut rx_buffer = [0 as u8; 1024];
     let mut tx_buffer = [0 as u8; 1024];
-
-    let mut socket = tcp::TcpSocket::new(stack, &mut rx_buffer, &mut tx_buffer);
 
     let mut ip_address = [0; 4];
     for (i, s) in SERVER_IP.split(".").enumerate() {
@@ -135,21 +134,25 @@ async fn main(spawner: Spawner) -> ! {
     let mut motor_right = Motor::new(
         mcpwm
             .operator0
-            .with_pin_a(peripherals.GPIO27, PwmPinConfig::UP_ACTIVE_HIGH),
-        Output::new(peripherals.GPIO26, Level::Low, OutputConfig::default()),
+            .with_pin_a(peripherals.GPIO33, PwmPinConfig::UP_ACTIVE_HIGH),
+        Output::new(peripherals.GPIO32, Level::Low, OutputConfig::default()),
     );
 
     let mut motor_left = Motor::new(
         mcpwm
             .operator1
-            .with_pin_a(peripherals.GPIO33, PwmPinConfig::UP_ACTIVE_HIGH),
-        Output::new(peripherals.GPIO32, Level::Low, OutputConfig::default()),
+            .with_pin_a(peripherals.GPIO26, PwmPinConfig::UP_ACTIVE_HIGH),
+        Output::new(peripherals.GPIO25, Level::Low, OutputConfig::default()),
     );
+
+    // timer等の設定
 
     let interval = INTERVAL.parse().unwrap();
 
-    let mut timeout_ticker = Ticker::every(Duration::from_millis(interval * 3));
+    let mut timeout_ticker = Ticker::every(Duration::from_millis(interval * 10));
     let mut heartbeat_ticker = Ticker::every(Duration::from_millis(interval));
+
+    // その他色々
 
     let mut robot_id = 0;
 
@@ -162,15 +165,27 @@ async fn main(spawner: Spawner) -> ! {
         let mut data_head = 0;
         let mut data = [0 as u8; DATA_MAX_SIZE];
 
+        println!("making socket");
+
+        let mut socket = tcp::TcpSocket::new(stack, &mut rx_buffer, &mut tx_buffer);
+
+        socket.set_keep_alive(Some(Duration::from_millis(interval)));
+
+        println!("connecting");
+
         socket
             .connect(embassy_net::IpEndpoint::new(ip_address, port))
             .await
             .unwrap();
 
-        let (rx, mut tx) = socket.split();
+        println!("socket is made.");
 
-        tx.write(to_slice_cobs(&RobotRespond::SendID(robot_id), &mut tx_buf).unwrap())
-            .await;
+        socket
+            .write(to_slice_cobs(&RobotRespond::SendID(robot_id), &mut tx_buf).unwrap())
+            .await
+            .unwrap();
+
+        socket.flush().await.unwrap();
 
         heartbeat_ticker.reset();
 
@@ -190,16 +205,16 @@ async fn main(spawner: Spawner) -> ! {
                         Ok(bites) => {
                             if bites == 0 {
                                 println!("No Connection");
-                                continue;
+                                socket.abort();
+                                break;
                             }
-                            for i in buf {
-                                if i == 0 && data_head == 0 {
+                            for i in &mut buf[..bites] {
+                                if *i == 0 && data_head == 0 {
                                     continue;
                                 }
-                                data[data_head] = i;
+                                data[data_head] = *i;
                                 data_head += 1;
-                                if i == 0 {
-                                    println!("{:?}", data);
+                                if *i == 0 {
                                     data_head = 0;
                                     timeout_ticker.reset();
                                     let data: FromServerData = from_bytes_cobs(&mut data).unwrap();
@@ -218,20 +233,41 @@ async fn main(spawner: Spawner) -> ! {
                         }
                         Err(e) => {
                             println!("{:?}", e);
+                            socket.abort();
+                            break;
                         }
                     }
                 }
                 Either3::Second(_) => {
-                    println!("HeartBeat");
                     socket
                         .write(to_slice_cobs(&RobotRespond::HeartBeat, &mut tx_buf).unwrap())
-                        .await;
+                        .await
+                        .unwrap();
+                    match with_timeout(Duration::from_millis(interval * 20), socket.flush()).await {
+                        Ok(x) => {
+                            if let Err(_) = x {
+                                println!("Send_ERROR");
+                                socket.abort();
+                                break;
+                            }
+                        }
+                        Err(_) => {
+                            println!("NEW_TIMEOUT");
+                            socket.abort();
+                            break;
+                        }
+                    }
                 }
                 Either3::Third(_) => {
                     println!("TIMEOUT");
+                    socket.abort();
+                    break;
                 }
             }
         }
+        motor_right.set_velocity(0.0);
+        motor_left.set_velocity(0.0);
+        Timer::after(Duration::from_millis(500)).await;
     }
 }
 

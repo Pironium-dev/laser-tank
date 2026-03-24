@@ -16,6 +16,7 @@ serde = { version = "1.0.228", features = ["derive"] }
 async-stream = "0.3.6"
 futures-core = "0.3.32"
 futures-util = "0.3.32"
+tokio-util = "0.7.18"
 
 [features]
 default = ["desktop"]
