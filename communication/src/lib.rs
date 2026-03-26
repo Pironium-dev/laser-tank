@@ -27,10 +27,15 @@ pub mod communication {
     }
 
     #[derive(Serialize, Deserialize, MaxSize, Debug)]
-    pub enum RobotRespond {
+    pub struct RobotRespond {
+        id: u8,
+        method: RobotMethod,
+    }
+
+    #[derive(Serialize, Deserialize, MaxSize, Debug)]
+    pub enum RobotMethod {
         HeartBeat,
-        SendID(u8),
-        Hit,
+        Hit(u8),
     }
 
     pub const fn calc_buffer_lengh<T>() -> usize
