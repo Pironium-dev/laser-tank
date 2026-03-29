@@ -7,7 +7,7 @@
 )]
 #![deny(clippy::large_stack_frames)]
 
-use communication::communication::{FromServerData, RobotMethod, RobotRespond};
+use communication::{FromServerData, RobotMethod, RobotRespond};
 use embassy_executor::Spawner;
 use embassy_futures::select::{Either3, select3};
 use embassy_net::{
@@ -179,7 +179,7 @@ async fn main(spawner: Spawner) -> ! {
 
     loop {
         match select3(
-            socket.recv_from_with(|s, _| from_bytes::<FromServerData>(dbg!(s))),
+            socket.recv_from_with(|s, _| from_bytes::<FromServerData>(s)),
             heartbeat.next(),
             timeout.next(),
         )
@@ -217,112 +217,7 @@ async fn main(spawner: Spawner) -> ! {
         }
     }
 
-    // loop {
-    //     let mut socket = tcp::TcpSocket::new(stack, &mut rx_buffer, &mut tx_buffer);
 
-    //     let mut data_head = 0;
-    //     let mut data = [0 as u8; DATA_MAX_SIZE];
-
-    //     println!("connecting");
-
-    //     loop {
-    //         match with_timeout(
-    //             Duration::from_millis(400),
-    //             (&mut socket).connect(embassy_net::IpEndpoint::new(ip_address, port)),
-    //         )
-    //         .await
-    //         {
-    //             Ok(Ok(())) => break,
-    //             _ => {
-    //                 socket.abort();
-    //                 println!("Retry");
-    //                 Timer::after_millis(100).await;
-    //             }
-    //         }
-    //     }
-
-    //     dbg!(socket.state());
-
-    //     println!("socket has made.");
-
-    //     socket
-    //         .write(to_slice_cobs(&RobotRespond::SendID(robot_id), &mut tx_buf).unwrap())
-    //         .await
-    //         .unwrap();
-
-    //     socket.flush().await.unwrap();
-
-    //     let mut timeout = Instant::now() + timeout_duration;
-    //     let mut heartbeat = Instant::now() + heartbeat_duration;
-    //     let mut buf = [0 as u8; DATA_MAX_SIZE];
-
-    //     loop {
-    //         let instant = Instant::now();
-    //         if timeout <= instant {
-    //             break;
-    //         }
-    //         if heartbeat <= instant {
-    //             // 送信
-    //             let data = to_slice_cobs(&RobotRespond::HeartBeat, &mut tx_buf).unwrap();
-    //             match with_timeout(Duration::from_millis(interval * 3), async {
-    //                 match socket.write(data).await {
-    //                     Ok(_) => {}
-    //                     Err(e) => {
-    //                         dbg!(e);
-    //                     }
-    //                 }
-    //             }).await {
-    //                 Ok(()) => {},
-    //                 Err(_) => {
-    //                     println!("BREAK");
-    //                     break;
-    //                 }
-    //             }
-    //             heartbeat = instant + heartbeat_duration;
-    //         }
-    //         if socket.can_recv() {
-    //             // 受信
-    //             // サーバーからの通信
-    //             if let Ok(bites) = socket.read(&mut buf).await {
-    //                 if bites == 0 {
-    //                     println!("No Connection");
-    //                     break;
-    //                 }
-    //                 for i in &mut buf[..bites] {
-    //                     if *i == 0 && data_head == 0 {
-    //                         continue;
-    //                     }
-    //                     data[data_head] = *i;
-    //                     data_head += 1;
-    //                     if *i == 0 {
-    //                         data_head = 0;
-    //                         let data: FromServerData = from_bytes_cobs(&mut data).unwrap();
-    //                         match data {
-    //                             FromServerData::Controller(state) => {
-    //                                 motor_right.set_velocity(state.right_stick);
-    //                                 motor_left.set_velocity(state.left_stick);
-    //                             }
-    //                             FromServerData::SetID(id) => {
-    //                                 robot_id = id;
-    //                                 println!("{}", id);
-    //                             }
-    //                         }
-    //                     }
-    //                 }
-    //             }
-    //             timeout = instant + timeout_duration;
-    //         }
-    //         Timer::after_millis(1).await;
-    //     }
-
-    //     socket.close();
-    //     drop(socket);
-    //     motor_right.set_velocity(0.0);
-    //     motor_left.set_velocity(0.0);
-    //     while !stack.is_link_up() {
-    //         Timer::after(Duration::from_millis(500)).await;
-    //     }
-    // }
 }
 
 #[embassy_executor::task]

@@ -1,16 +1,14 @@
-use communication::communication;
 use dioxus::prelude::*;
 use gilrs;
 use postcard::{experimental::max_size::MaxSize, from_bytes, to_slice};
 use std::{
     net::SocketAddr,
-    pin::Pin,
     sync::{Arc, Mutex}
 };
 use tokio::{
     self,
     net::UdpSocket,
-    time::{self, Duration, Instant, Sleep},
+    time::{self, Duration, Instant},
 };
 
 const MAIN_CSS: Asset = asset!("/assets/main.css");
@@ -18,27 +16,23 @@ const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
 
 #[tokio::main]
 async fn main() {
-    let controller_1p = Arc::new(Mutex::new(communication::ControllerState::new()));
-    let controller_2p = Arc::new(Mutex::new(communication::ControllerState::new()));
+    let controllers = [
+        Arc::new(Mutex::new(communication::ControllerState::new())),
+        Arc::new(Mutex::new(communication::ControllerState::new())),
+    ];
 
     // コントローラーの入力を受け取る
     {
-        let controller_1p = controller_1p.clone();
-        let controller_2p = controller_2p.clone();
+        let controllers = controllers.clone();
 
         tokio::spawn(async move {
             let mut g = gilrs::Gilrs::new().unwrap();
             while let Some(e) = g.next_event_blocking(None) {
                 let id: usize = e.id.into();
-                let mut controller = {
-                    if id == 0 {
-                        controller_1p.lock().unwrap()
-                    } else if id == 1 {
-                        controller_2p.lock().unwrap()
-                    } else {
-                        continue;
-                    }
-                };
+                if id >= 2 {
+                    continue;
+                }
+                let mut controller = controllers[id].lock().unwrap();
 
                 match e.event {
                     gilrs::EventType::ButtonPressed(b, _) => {
@@ -67,8 +61,7 @@ async fn main() {
 
         let mut rx_buf = [0; BUFFER_SIZE];
 
-        let mut handler_1p: Option<RobotHandler> = None;
-        let mut handler_2p: Option<RobotHandler> = None;
+        let mut handlers: [Option<RobotHandler>; 2] = [None, None];
 
         let mut ticker = time::interval(Duration::from_millis(
             env!("INTERVAL").parse::<u64>().unwrap(),
@@ -84,62 +77,47 @@ async fn main() {
                     id = 1 or 2 続行
                     */
                     if message.id == 0 {
-                        if let Some(ref h) = handler_1p && h.addr == addr {
-                            println!("OK");
+                        if let Some(idx) = handlers.iter().position(|h| h.as_ref().is_some_and(|h| h.addr == addr)) {
+                            println!("OK (Reconnecting)");
+                            let h = handlers[idx].as_ref().unwrap();
                             h.notify_id().await;
-                            message.id = 1;
-                        } else if let Some(ref h) = handler_2p && h.addr == addr {
+                            message.id = (idx + 1) as u8;
+                            continue;
+                        } else if let Some(idx) = handlers.iter().position(|h| h.is_none()) {
+                            println!("OK (New Connection)");
+                            let h = RobotHandler::new((idx + 1) as u8, addr, socket.clone(), controllers[idx].clone());
                             h.notify_id().await;
-                            message.id = 2;
-                        } else if handler_1p.is_none() {
-                            println!("OK");
-                            let h = RobotHandler::new(1, addr, socket.clone(), controller_1p.clone());
-                            h.notify_id().await;
-                            handler_1p = Some(RobotHandler::new(1, addr, socket.clone(), controller_1p.clone()));
-                            message.id = 1;
-                        } else if handler_2p.is_none() {
-                            let h = RobotHandler::new(2, addr, socket.clone(), controller_1p.clone());
-                            h.notify_id().await;
-                            handler_2p = Some(RobotHandler::new(2, addr, socket.clone(), controller_1p.clone()));
-                            message.id = 2;
+                            handlers[idx] = Some(h);
+                            message.id = (idx + 1) as u8;
+                            continue;
                         } else {
                             println!("id: 0だけど何もできませんでした");
                             continue;
                         }
                     }
-                    if let Some(ref mut h) = handler_1p && message.id == 1 {
-                        h.recv_heatbeat();
+                    
+                    if message.id >= 1 && message.id <= 2 {
+                        let idx = (message.id - 1) as usize;
+                        if let Some(ref mut h) = handlers[idx] {
+                            h.recv_heatbeat();
+                            continue
+                        }
                     }
-                    if let Some(ref mut h) = handler_2p && message.id == 2 {
-                        h.recv_heatbeat();
-                    }
+
+                    println!("何もしてません: {:?}", message);
                 }
                 _ = ticker.tick() => {
-                    if let Some(ref h) = handler_1p {
-                        h.send_controller_data().await;
+                    let now = Instant::now();
+                    for (i, h_opt) in handlers.iter_mut().enumerate() {
+                        if let Some(h) = h_opt {
+                            if now >= h.heartbeat_deadline {
+                                println!("CLOSE {}", i + 1);
+                                *h_opt = None;
+                            } else {
+                                h.send_controller_data().await;
+                            }
+                        }
                     }
-                    if let Some(ref h) = handler_2p {
-                        h.send_controller_data().await;
-                    }
-                }
-                _ = async {
-                    if let Some(h) = handler_1p.as_mut() {
-                        h.heartbeat_timer.as_mut().await;
-                    } else {
-                        std::future::pending::<()>().await;
-                    }
-                } => {
-                    println!("CLOSE");
-                    handler_1p = None;
-                }
-                _ = async {
-                    if let Some(h) = handler_2p.as_mut() {
-                        h.heartbeat_timer.as_mut().await;
-                    } else {
-                        std::future::pending::<()>().await;
-                    }
-                } => {
-                    handler_2p = None;
                 }
             }
         }
@@ -154,7 +132,7 @@ struct RobotHandler {
     socket: Arc<UdpSocket>,
     controller: Arc<Mutex<communication::ControllerState>>,
     heartbeat_timeout: Duration,
-    heartbeat_timer: Pin<Box<Sleep>>,
+    heartbeat_deadline: Instant,
 }
 
 impl RobotHandler {
@@ -165,13 +143,12 @@ impl RobotHandler {
         controller: Arc<Mutex<communication::ControllerState>>,
     ) -> Self {
         let heartbeat_timeout = Duration::from_millis(env!("INTERVAL").parse::<u64>().unwrap() * 10);
-        let timer = Box::pin(time::sleep_until(Instant::now() + heartbeat_timeout));
         Self {
             id,
             addr,
             socket,
             controller,
-            heartbeat_timer: timer,
+            heartbeat_deadline: Instant::now() + heartbeat_timeout,
             heartbeat_timeout,
         }
     }
@@ -189,7 +166,7 @@ impl RobotHandler {
     }
 
     fn recv_heatbeat(&mut self) {
-        self.heartbeat_timer = Box::pin(time::sleep_until(Instant::now() + self.heartbeat_timeout));
+        self.heartbeat_deadline = Instant::now() + self.heartbeat_timeout;
     }
 
     async fn send_controller_data(&self) {
