@@ -1,14 +1,17 @@
-use async_stream::stream;
 use communication::communication;
 use dioxus::prelude::*;
-use futures_core::Stream;
-use futures_util::StreamExt;
 use gilrs;
-use postcard::{from_bytes_cobs, to_slice_cobs};
-use std::sync::{Arc, Mutex};
-use tokio::io::AsyncReadExt;
-use tokio::{self, io::AsyncWriteExt, net, time};
-use tokio_util::sync::CancellationToken;
+use postcard::{experimental::max_size::MaxSize, from_bytes, to_slice};
+use std::{
+    net::SocketAddr,
+    pin::Pin,
+    sync::{Arc, Mutex}
+};
+use tokio::{
+    self,
+    net::UdpSocket,
+    time::{self, Duration, Instant, Sleep},
+};
 
 const MAIN_CSS: Asset = asset!("/assets/main.css");
 const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
@@ -50,108 +53,94 @@ async fn main() {
                     },
                     _ => {}
                 }
-                println!("OK");
             }
         });
     }
 
     tokio::spawn(async move {
-        let addr = format!("{}:{}", env!("SERVER_IP"), env!("SERVER_PORT"))
-            .parse()
-            .unwrap();
+        let addr = format!("{}:{}", env!("SERVER_IP"), env!("SERVER_PORT"));
 
-        let socket = net::TcpSocket::new_v4().unwrap();
-        socket.set_reuseaddr(true).unwrap();
-        socket.set_nodelay(true).unwrap();
-        socket.bind(addr).unwrap();
+        let socket = Arc::new(UdpSocket::bind(addr).await.unwrap());
+        dbg!(&socket);
 
-        let listener = socket.listen(4).unwrap();
+        const BUFFER_SIZE: usize = communication::FromServerData::POSTCARD_MAX_SIZE;
 
-        const BUFFER_SIZE: usize =
-            communication::calc_buffer_lengh::<communication::FromServerData>();
+        let mut rx_buf = [0; BUFFER_SIZE];
 
-        let mut buf_1p = [0; BUFFER_SIZE];
-        let mut buf_2p = [0; BUFFER_SIZE];
+        let mut handler_1p: Option<RobotHandler> = None;
+        let mut handler_2p: Option<RobotHandler> = None;
 
-        let mut robot_1p: Option<tokio::task::JoinHandle<()>> = None;
-        let mut robot_2p: Option<tokio::task::JoinHandle<()>> = None;
-
-        let mut cancel_1p = CancellationToken::new();
-        let mut cancel_2p = CancellationToken::new();
+        let mut ticker = time::interval(Duration::from_millis(
+            env!("INTERVAL").parse::<u64>().unwrap(),
+        ));
 
         loop {
             tokio::select! {
-                // 接続を待ち、robot_*pに分ける
-                Ok(i) = listener.accept() => {
-                    println!("{:?}", &i);
-                    let (rx, mut tx) = i.0.into_split();
-
-                    let mut fut = Box::<_>::pin(cobs_reader(rx).await);
-
-                    match fut.next().await {
-                        None => {println!("None"); continue;}
-                        Some(x) => {
-                            match x {
-                                communication::RobotRespond::SendID(id) =>{
-                                    let mut flag_1p = false;
-                                    let mut flag_2p = false;
-                                    if id == 0 {
-                                        if robot_1p.is_none(){
-                                            flag_1p = true;
-                                        } else if robot_2p.is_none() {
-                                            flag_2p = true;
-                                        } else {
-                                            flag_1p = true;
-                                        }
-                                    } else if id == 1{
-                                        flag_1p = true;
-                                    } else if id == 2{
-                                        flag_2p = true;
-                                    }
-                                    dbg!(flag_1p, flag_2p);
-                                    if flag_1p{
-                                        println!("1P");
-                                        if let Some(robot) = robot_1p {
-                                            robot.abort();
-                                            cancel_1p = CancellationToken::new();
-                                        }
-                                        tx.write_all(&mut to_slice_cobs(&communication::FromServerData::SetID(1), &mut buf_1p).unwrap()).await.unwrap();
-                                        robot_1p = Some(tokio::spawn(robot_handler(tx, fut, controller_1p.clone(), cancel_1p.child_token())));
-                                    } else if flag_2p {
-                                        if let Some(robot) = robot_2p {
-                                            robot.abort();
-                                            cancel_2p = CancellationToken::new();
-                                        }
-                                        tx.write_all(&mut to_slice_cobs(&communication::FromServerData::SetID(2), &mut buf_2p).unwrap()).await.unwrap();
-                                        robot_2p = Some(tokio::spawn(robot_handler(tx, fut, controller_2p.clone(), cancel_2p.child_token())));
-                                    } else {
-                                        println!("?違う人が入ってきたようだ、、、?")
-                                    }
-                                },
-                                _ => {continue;}
-                            }
+                Ok((_, addr)) = socket.recv_from(&mut rx_buf) => {
+                    let mut message: communication::RobotRespond = from_bytes(&mut rx_buf).unwrap();
+                    /*
+                    id = 0 => 振り分け
+                    id = 0 でも addrを知っている => addrを再通知
+                    id = 1 or 2 続行
+                    */
+                    if message.id == 0 {
+                        if let Some(ref h) = handler_1p && h.addr == addr {
+                            println!("OK");
+                            h.notify_id().await;
+                            message.id = 1;
+                        } else if let Some(ref h) = handler_2p && h.addr == addr {
+                            h.notify_id().await;
+                            message.id = 2;
+                        } else if handler_1p.is_none() {
+                            println!("OK");
+                            let h = RobotHandler::new(1, addr, socket.clone(), controller_1p.clone());
+                            h.notify_id().await;
+                            handler_1p = Some(RobotHandler::new(1, addr, socket.clone(), controller_1p.clone()));
+                            message.id = 1;
+                        } else if handler_2p.is_none() {
+                            let h = RobotHandler::new(2, addr, socket.clone(), controller_1p.clone());
+                            h.notify_id().await;
+                            handler_2p = Some(RobotHandler::new(2, addr, socket.clone(), controller_1p.clone()));
+                            message.id = 2;
+                        } else {
+                            println!("id: 0だけど何もできませんでした");
+                            continue;
                         }
                     }
-                    println!("FINISH");
-                },
+                    if let Some(ref mut h) = handler_1p && message.id == 1 {
+                        h.recv_heatbeat();
+                    }
+                    if let Some(ref mut h) = handler_2p && message.id == 2 {
+                        h.recv_heatbeat();
+                    }
+                }
+                _ = ticker.tick() => {
+                    if let Some(ref h) = handler_1p {
+                        h.send_controller_data().await;
+                    }
+                    if let Some(ref h) = handler_2p {
+                        h.send_controller_data().await;
+                    }
+                }
                 _ = async {
-                    if let Some(robot) = robot_1p.as_mut(){
-                        robot.await
+                    if let Some(h) = handler_1p.as_mut() {
+                        h.heartbeat_timer.as_mut().await;
                     } else {
-                        Ok(std::future::pending::<()>().await)
+                        std::future::pending::<()>().await;
                     }
                 } => {
-                    robot_1p = None;
-                },
+                    println!("CLOSE");
+                    handler_1p = None;
+                }
                 _ = async {
-                    if let Some(robot) = robot_2p.as_mut(){
-                        robot.await
+                    if let Some(h) = handler_2p.as_mut() {
+                        h.heartbeat_timer.as_mut().await;
                     } else {
-                        Ok(std::future::pending::<()>().await)
+                        std::future::pending::<()>().await;
                     }
                 } => {
-                    robot_2p = None;
-                },
+                    handler_2p = None;
+                }
             }
         }
     });
@@ -159,87 +148,57 @@ async fn main() {
     dioxus::launch(App);
 }
 
-async fn robot_handler(
-    mut write_stream: net::tcp::OwnedWriteHalf,
-    mut fut: impl Stream<Item = communication::RobotRespond> + std::marker::Unpin,
+struct RobotHandler {
+    id: u8,
+    addr: SocketAddr,
+    socket: Arc<UdpSocket>,
     controller: Arc<Mutex<communication::ControllerState>>,
-    token: CancellationToken,
-) {
-    let duration = time::Duration::from_millis(env!("INTERVAL").parse().unwrap());
-
-    let mut interval = time::interval(duration);
-    let timeout = time::sleep(duration * 10);
-
-    tokio::pin!(timeout);
-
-    let mut buf = [0 as u8; communication::calc_buffer_lengh::<communication::FromServerData>()];
-
-    dbg!(&interval);
-
-    loop {
-        tokio::select! {
-            response = fut.next() => {
-                timeout.as_mut().reset(tokio::time::Instant::now() + duration * 10);
-                match response {
-                    None => break,
-                    Some(_r) => {
-
-                    }
-                }
-            },
-            _ = interval.tick() => {
-                let data;
-                {
-                    let controller_state = controller.lock().unwrap();
-                    data = to_slice_cobs(&communication::FromServerData::Controller(*controller_state), &mut buf).unwrap();
-                }
-                if write_stream.write_all(data).await.is_err() {
-                    println!("WRITE_ERROR");
-                    break;
-                }
-            },
-            _ = &mut timeout => {
-                println!("TIMEOUT");
-                break;
-            },
-            _ = token.cancelled() => {
-                println!("CANCELL");
-                break;
-            }
-        }
-    }
+    heartbeat_timeout: Duration,
+    heartbeat_timer: Pin<Box<Sleep>>,
 }
 
-async fn cobs_reader(
-    mut read_stream: net::tcp::OwnedReadHalf,
-) -> impl Stream<Item = communication::RobotRespond> {
-    const BUFFER_LENGTH: usize = communication::calc_buffer_lengh::<communication::RobotRespond>();
-    stream! {
-        let mut buf = [0 as u8; BUFFER_LENGTH];
-        let mut data_head = 0;
-        let mut data = [0 as u8; BUFFER_LENGTH];
-
-        loop {
-            // cobsのデコードをする
-            match read_stream.read(&mut buf).await {
-                Ok(0) => break,
-                Ok(l) => {
-                    for i in 0..l{
-                        if buf[i] == 0 && data_head == 0 {
-                            continue;
-                        }
-                        data[data_head] = buf[i];
-                        data_head += 1;
-                        if buf[i] == 0 {
-                            yield from_bytes_cobs(&mut data).unwrap();
-                            data.fill(0);
-                            data_head = 0;
-                        }
-                    }
-                },
-                Err(_) => break,
-            }
+impl RobotHandler {
+    fn new(
+        id: u8,
+        addr: SocketAddr,
+        socket: Arc<UdpSocket>,
+        controller: Arc<Mutex<communication::ControllerState>>,
+    ) -> Self {
+        let heartbeat_timeout = Duration::from_millis(env!("INTERVAL").parse::<u64>().unwrap() * 10);
+        let timer = Box::pin(time::sleep_until(Instant::now() + heartbeat_timeout));
+        Self {
+            id,
+            addr,
+            socket,
+            controller,
+            heartbeat_timer: timer,
+            heartbeat_timeout,
         }
+    }
+
+    async fn notify_id(&self) {
+        let mut buf = [0; communication::FromServerData::POSTCARD_MAX_SIZE];
+
+        self.socket
+            .send_to(
+                to_slice(&communication::FromServerData::SetID(self.id), &mut buf).unwrap(),
+                self.addr,
+            )
+            .await
+            .unwrap();
+    }
+
+    fn recv_heatbeat(&mut self) {
+        self.heartbeat_timer = Box::pin(time::sleep_until(Instant::now() + self.heartbeat_timeout));
+    }
+
+    async fn send_controller_data(&self) {
+        let mut buf = [0; communication::FromServerData::POSTCARD_MAX_SIZE];
+        let data = {
+            let controller = self.controller.lock().unwrap();
+            to_slice(&communication::FromServerData::Controller(*controller), &mut buf).unwrap()
+        };
+        self.socket.send_to(data, self.addr).await.unwrap();
     }
 }
 

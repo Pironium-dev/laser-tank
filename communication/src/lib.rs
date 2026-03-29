@@ -28,8 +28,8 @@ pub mod communication {
 
     #[derive(Serialize, Deserialize, MaxSize, Debug)]
     pub struct RobotRespond {
-        id: u8,
-        method: RobotMethod,
+        pub id: u8,
+        pub method: RobotMethod,
     }
 
     #[derive(Serialize, Deserialize, MaxSize, Debug)]
@@ -38,12 +38,6 @@ pub mod communication {
         Hit(u8),
     }
 
-    pub const fn calc_buffer_lengh<T>() -> usize
-    where
-        T: MaxSize,
-    {
-        T::POSTCARD_MAX_SIZE + 2
-    }
 }
 
 // esp32からの通信は&[1]のみ
