@@ -17,8 +17,8 @@ const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
 #[tokio::main]
 async fn main() {
     let controllers = [
-        Arc::new(Mutex::new(communication::ControllerState::new())),
-        Arc::new(Mutex::new(communication::ControllerState::new())),
+        Arc::new(Mutex::new(communication::ControllerState::default())),
+        Arc::new(Mutex::new(communication::ControllerState::default())),
     ];
 
     // コントローラーの入力を受け取る
@@ -37,7 +37,8 @@ async fn main() {
                 match e.event {
                     gilrs::EventType::ButtonPressed(b, _) => {
                         if b == gilrs::ev::Button::East {
-                            controller.shot = true;
+                            controller.shot = controller.shot.wrapping_add(1);
+                            println!("{}", controller.shot);
                         }
                     }
                     gilrs::EventType::AxisChanged(axis, x, _) => match axis {
@@ -71,6 +72,7 @@ async fn main() {
             tokio::select! {
                 Ok((_, addr)) = socket.recv_from(&mut rx_buf) => {
                     let mut message: communication::RobotRespond = from_bytes(&mut rx_buf).unwrap();
+                    println!("{:?}", &message);
                     /*
                     id = 0 => 振り分け
                     id = 0 でも addrを知っている => addrを再通知
@@ -89,6 +91,8 @@ async fn main() {
                             h.notify_id().await;
                             handlers[idx] = Some(h);
                             message.id = (idx + 1) as u8;
+                            let mut controller = controllers[idx].lock().unwrap();
+                            controller.shot = 0;
                             continue;
                         } else {
                             println!("id: 0だけど何もできませんでした");
@@ -111,9 +115,10 @@ async fn main() {
                     for (i, h_opt) in handlers.iter_mut().enumerate() {
                         if let Some(h) = h_opt {
                             if now >= h.heartbeat_deadline {
-                                println!("CLOSE {}", i + 1);
-                                *h_opt = None;
+                                //println!("CLOSE {}", i + 1);
+                                //*h_opt = None;
                             } else {
+                                println!("SEND");
                                 h.send_controller_data().await;
                             }
                         }
