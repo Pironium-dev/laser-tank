@@ -13,6 +13,9 @@ use tokio::{
 
 const MAIN_CSS: Asset = asset!("/assets/main.css");
 const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
+const SERVER_IP: &str = env!("SERVER_IP");
+const RECEIVE_PORT: &str = env!("RECEIVE_PORT");
+const INTERVAL: &str = env!("INTERVAL");
 
 #[tokio::main]
 async fn main() {
@@ -53,19 +56,19 @@ async fn main() {
     }
 
     tokio::spawn(async move {
-        let addr = format!("{}:{}", env!("SERVER_IP"), env!("SERVER_PORT"));
+        let addr = format!("{}:{}", SERVER_IP, RECEIVE_PORT);
 
         let socket = Arc::new(UdpSocket::bind(addr).await.unwrap());
         dbg!(&socket);
 
-        const BUFFER_SIZE: usize = communication::FromServerData::POSTCARD_MAX_SIZE;
+        const BUFFER_SIZE: usize = communication::ServerData::POSTCARD_MAX_SIZE;
 
         let mut rx_buf = [0; BUFFER_SIZE];
 
         let mut handlers: [Option<RobotHandler>; 2] = [None, None];
 
         let mut ticker = time::interval(Duration::from_millis(
-            env!("INTERVAL").parse::<u64>().unwrap(),
+            INTERVAL.parse::<u64>().unwrap(),
         ));
 
         loop {
@@ -79,7 +82,7 @@ async fn main() {
                     id = 1 or 2 続行
                     */
                     if message.id == 0 {
-                        if let Some(idx) = handlers.iter().position(|h| h.as_ref().is_some_and(|h| h.addr == addr)) {
+                        if let Some(idx) = handlers.iter().position(|h| h.as_ref().is_some_and(|h| h.recv_addr == addr)) {
                             println!("OK (Reconnecting)");
                             let h = handlers[idx].as_ref().unwrap();
                             h.notify_id().await;
@@ -112,7 +115,7 @@ async fn main() {
                 }
                 _ = ticker.tick() => {
                     let now = Instant::now();
-                    for (i, h_opt) in handlers.iter_mut().enumerate() {
+                    for (_i, h_opt) in handlers.iter_mut().enumerate() {
                         if let Some(h) = h_opt {
                             if now >= h.heartbeat_deadline {
                                 //println!("CLOSE {}", i + 1);
@@ -133,7 +136,8 @@ async fn main() {
 
 struct RobotHandler {
     id: u8,
-    addr: SocketAddr,
+    recv_addr: SocketAddr,
+    send_addr: SocketAddr,
     socket: Arc<UdpSocket>,
     controller: Arc<Mutex<communication::ControllerState>>,
     heartbeat_timeout: Duration,
@@ -147,11 +151,15 @@ impl RobotHandler {
         socket: Arc<UdpSocket>,
         controller: Arc<Mutex<communication::ControllerState>>,
     ) -> Self {
-        let heartbeat_timeout = Duration::from_millis(env!("INTERVAL").parse::<u64>().unwrap() * 10);
+        let heartbeat_timeout = Duration::from_millis(INTERVAL.parse::<u64>().unwrap() * 10);
+
+        let send_addr = SocketAddr::new(addr.ip(), RECEIVE_PORT.parse().unwrap());
+        
         Self {
             id,
-            addr,
-            socket,
+            recv_addr: addr,
+            send_addr,
+            socket: socket,
             controller,
             heartbeat_deadline: Instant::now() + heartbeat_timeout,
             heartbeat_timeout,
@@ -159,12 +167,12 @@ impl RobotHandler {
     }
 
     async fn notify_id(&self) {
-        let mut buf = [0; communication::FromServerData::POSTCARD_MAX_SIZE];
+        let mut buf = [0; communication::ServerData::POSTCARD_MAX_SIZE];
 
         self.socket
             .send_to(
-                to_slice(&communication::FromServerData::SetID(self.id), &mut buf).unwrap(),
-                self.addr,
+                to_slice(&communication::ServerData::SetID(self.id), &mut buf).unwrap(),
+                self.send_addr,
             )
             .await
             .unwrap();
@@ -175,12 +183,12 @@ impl RobotHandler {
     }
 
     async fn send_controller_data(&self) {
-        let mut buf = [0; communication::FromServerData::POSTCARD_MAX_SIZE];
+        let mut buf = [0; communication::ServerData::POSTCARD_MAX_SIZE];
         let data = {
             let controller = self.controller.lock().unwrap();
-            to_slice(&communication::FromServerData::Controller(*controller), &mut buf).unwrap()
+            to_slice(&communication::ServerData::Controller(*controller), &mut buf).unwrap()
         };
-        self.socket.send_to(data, self.addr).await.unwrap();
+        self.socket.send_to(data, self.send_addr).await.unwrap();
     }
 }
 

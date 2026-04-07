@@ -7,18 +7,15 @@
 )]
 #![deny(clippy::large_stack_frames)]
 
-use communication::{FromServerData, RobotMethod, RobotRespond};
+use communication::{ServerData, RobotMethod, RobotRespond};
 use embassy_executor::Spawner;
 use embassy_futures::select::{Either, select};
 use embassy_net::{
     self, Runner, Stack,
     udp::{PacketMetadata, UdpMetadata, UdpSocket},
 };
-use embassy_sync::{
-    blocking_mutex::raw::CriticalSectionRawMutex,
-    channel::{Channel, Receiver, Sender},
-};
-use embassy_time::{Duration, Ticker, with_timeout, Timer};
+use embassy_sync::once_lock::OnceLock;
+use embassy_time::{Duration, Ticker, Timer, with_timeout};
 use esp_hal::{
     clock::CpuClock,
     gpio::{Level, Output, OutputConfig},
@@ -33,7 +30,6 @@ use esp_println::{dbg, println};
 use esp_radio::wifi::{ClientConfig, ModeConfig};
 use esp32::motor::Motor;
 use postcard::{experimental::max_size::MaxSize, from_bytes, to_slice};
-use smoltcp::socket::icmp::Socket;
 use static_cell::StaticCell;
 
 #[panic_handler]
@@ -57,7 +53,8 @@ esp_bootloader_esp_idf::esp_app_desc!();
 const SSID: &str = env!("SSID");
 const PASSWORD: &str = env!("PASSWORD");
 const SERVER_IP: &str = env!("SERVER_IP");
-const SERVER_PORT: &str = env!("SERVER_PORT");
+const RECEIVE_PORT: &str = env!("RECEIVE_PORT");
+const SEND_PORT: &str = env!("SEND_PORT");
 const INTERVAL: &str = env!("INTERVAL");
 
 #[esp_rtos::main]
@@ -189,83 +186,19 @@ async fn main(spawner: Spawner) -> ! {
 
     let mut buf = [0 as u8; RobotRespond::POSTCARD_MAX_SIZE];
 
+    static ID: OnceLock<u8> = OnceLock::new();
+
     /*
     task1 socketのコントロール、udp送信
     task2 udp送信、rmt受信、つぎに送信する内容の一時記録
     task3 udp受信、機体操作
     */
 
-    static UDP_RECV: Channel<CriticalSectionRawMutex, FromServerData, 3> = Channel::new();
-    static UDP_SEND: Channel<CriticalSectionRawMutex, RobotMethod, 3> = Channel::new();
-
     spawner
-        .spawn(udp_handler(stack, UDP_SEND.receiver(), UDP_RECV.sender()))
+        .spawn(drive(stack, motor_right, motor_left, interval, &ID))
         .unwrap();
 
-    spawner
-        .spawn(drive(
-            motor_right,
-            motor_left,
-            interval,
-            UDP_RECV.receiver(),
-        ))
-        .unwrap();
-
-    spawner.spawn(monitor(UDP_SEND.sender(), interval)).unwrap();
-
-    // loop {
-    //     match select4(
-    //         socket.recv_from_with(|s, _| from_bytes::<FromServerData>(s)),
-    //         heartbeat.next(),
-    //         timeout.next(),
-    //         rx_channel.receive(&mut rx_data),
-    //     )
-    //     .await
-    //     {
-    //         Either4::First(d) => {
-    //             let data = d.unwrap();
-    //             println!("OK 1");
-    //             timeout.reset();
-    //             match data {
-    //                 FromServerData::SetID(id) => {
-    //                     robot_id = id;
-    //                 }
-    //                 FromServerData::Controller(c) => {
-    //                     motor_right.set_velocity(c.right_stick);
-    //                     motor_left.set_velocity(c.left_stick);
-    //                     if shot_id.wrapping_add(1) == c.shot {
-    //                         shot_id = c.shot;
-    //                         println!("SHOT: {}", shot_id);
-    //                         tx_channel.transmit(&tx_data).await.unwrap();
-    //                         println!("FIN");
-    //                     }
-    //                 }
-    //             }
-    //         }
-    //         Either4::Second(_) => {
-    //             println!("OK 2");
-    //             let data = to_slice(
-    //                 &RobotRespond {
-    //                     id: robot_id,
-    //                     method: RobotMethod::HeartBeat,
-    //                 },
-    //                 &mut buf,
-    //             )
-    //             .unwrap();
-    //             socket.send_to(data, server_endpoint).await.unwrap();
-    //         }
-    //         Either4::Third(_) => {
-    //             println!("OK 3");
-    //             timeout.reset();
-    //             motor_right.set_velocity(0.0);
-    //             motor_left.set_velocity(0.0);
-    //         }
-    //         Either4::Fourth(result) => {
-    //             result.unwrap();
-    //             dbg!(rx_data); // printの代わり
-    //         }
-    //     }
-    // }
+    spawner.spawn(monitor(stack, interval, &ID)).unwrap();
 
     loop {
         Timer::after_secs(3600).await;
@@ -279,23 +212,50 @@ async fn start_wifi(mut runner: Runner<'static, esp_radio::wifi::WifiDevice<'sta
 
 #[embassy_executor::task]
 async fn drive(
+    stack: Stack<'static>,
     mut motor_right: Motor<'static, MCPWM0<'static>, 0>,
     mut motor_left: Motor<'static, MCPWM0<'static>, 1>,
     interval: u64,
-    recv: Receiver<'static, CriticalSectionRawMutex, FromServerData, 3>,
+    id: &'static OnceLock<u8>,
 ) {
     let interval = Duration::from_millis(interval * 10);
+
+    let mut rx_buffer = [0 as u8; 1024 * 2];
+    let mut tx_buffer = [];
+
+    let mut rx_meta = [PacketMetadata::EMPTY; 3];
+    let mut tx_meta = [];
+
+    let mut socket = UdpSocket::new(
+        stack,
+        &mut rx_meta,
+        &mut rx_buffer,
+        &mut tx_meta,
+        &mut tx_buffer,
+    );
+
+    socket.bind(RECEIVE_PORT.parse::<u16>().unwrap()).unwrap();
+
+    let mut buf = [0; ServerData::POSTCARD_MAX_SIZE];
+
     loop {
-        match with_timeout(interval, recv.receive()).await {
+        match with_timeout(interval, socket.recv_from(&mut buf)).await {
             Ok(result) => match result {
-                FromServerData::Controller(c) => {
-                    motor_left.set_velocity(c.left_stick);
-                    motor_right.set_velocity(c.right_stick);
+                Ok((x, _)) => {
+                    match from_bytes(&buf[..x]).unwrap() {
+                        ServerData::Controller(c) => {
+                            motor_left.set_velocity(c.left_stick);
+                            motor_right.set_velocity(c.right_stick);
+                        }
+                        ServerData::SetID(new_id) => {
+                            println!("ID: {new_id}");
+                            let _ = id.init(new_id);
+                        }
+                    }
                 }
-                FromServerData::SetID(id) => {
-                    println!("ID: {id}");
-                }
-            },
+                Err(_x) => {}
+            }
+            
             Err(_) => {
                 motor_right.set_velocity(0.0);
                 motor_left.set_velocity(0.0);
@@ -305,11 +265,7 @@ async fn drive(
 }
 
 #[embassy_executor::task]
-async fn udp_handler(
-    stack: Stack<'static>,
-    send_rx: Receiver<'static, CriticalSectionRawMutex, RobotMethod, 3>,
-    recv_tx: Sender<'static, CriticalSectionRawMutex, FromServerData, 3>,
-) {
+async fn monitor(stack: Stack<'static>, interval: u64, id: &'static OnceLock<u8>) {
     let mut ip_address = [0; 4];
     for (i, s) in SERVER_IP.split(".").enumerate() {
         ip_address[i] = s.parse().unwrap();
@@ -317,13 +273,14 @@ async fn udp_handler(
 
     let ip_address =
         embassy_net::IpAddress::v4(ip_address[0], ip_address[1], ip_address[2], ip_address[3]);
-    let port = SERVER_PORT.parse().unwrap();
 
-    let mut rx_buffer = [0 as u8; 1024];
-    let mut tx_buffer = [0 as u8; 1024];
+    let endpoint = (ip_address, RECEIVE_PORT.parse::<u16>().unwrap());
 
-    let mut rx_meta = [PacketMetadata::EMPTY; 3];
+    let mut tx_buffer = [0 as u8; 1024 * 2];
+    let mut rx_buffer = [];
+
     let mut tx_meta = [PacketMetadata::EMPTY; 3];
+    let mut rx_meta = [];
 
     let mut socket = UdpSocket::new(
         stack,
@@ -332,50 +289,30 @@ async fn udp_handler(
         &mut tx_meta,
         &mut tx_buffer,
     );
-    let server_endpoint = UdpMetadata::from((ip_address, port));
 
-    let my_ipaddress = stack.config_v4().unwrap().address.address();
+    socket.bind(SEND_PORT.parse::<u16>().unwrap()).unwrap();
 
-    socket.bind((my_ipaddress, port)).unwrap();
+    let mut buf = [0; RobotRespond::POSTCARD_MAX_SIZE];
 
-    let mut rx_buffer = [0; FromServerData::POSTCARD_MAX_SIZE];
-    let mut tx_buffer = [0; RobotRespond::POSTCARD_MAX_SIZE];
-
-    let mut robot_id: u8 = 0;
-
-    loop {
-        match select(socket.recv_from(&mut rx_buffer), send_rx.receive()).await {
-            Either::First(x) => match x {
-                Ok(x) => {
-                    let data = from_bytes::<FromServerData>(&rx_buffer[..x.0]).unwrap();
-                    if let FromServerData::SetID(id) = data {
-                        robot_id = id;
-                    }
-                    println!("OK");
-                    recv_tx.send(data).await;
-                }
-                Err(_) => {}
-            },
-            Either::Second(x) => {
-                let data = to_slice(
-                    &RobotRespond {
-                        id: robot_id,
-                        method: x,
-                    },
-                    &mut tx_buffer,
-                )
-                .unwrap();
-                socket.send_to(data, server_endpoint).await.unwrap();
-            }
-        }
-    }
-}
-
-#[embassy_executor::task]
-async fn monitor(send: Sender<'static, CriticalSectionRawMutex, RobotMethod, 3>, interval: u64) {
     let mut heartbeat = Ticker::every(Duration::from_millis(interval));
     loop {
-        send.send(RobotMethod::HeartBeat).await;
+        let respond = {
+            RobotRespond {
+                id: {
+                    if id.is_set() {
+                        *(id.get().await)
+                    } else {
+                        0
+                    }
+                },
+                method: RobotMethod::HeartBeat,
+            }
+        };
+
+        if socket.may_send() {
+            println!("SEND");
+            socket.send_to(to_slice(&respond, &mut buf).unwrap(), endpoint).await.unwrap();
+        }
         heartbeat.next().await;
     }
 }
