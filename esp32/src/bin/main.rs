@@ -27,7 +27,7 @@ use esp_hal::{
     timer::timg::TimerGroup,
 };
 use esp_println::{dbg, println};
-use esp_radio::wifi::{ClientConfig, ModeConfig};
+use esp_radio::wifi::{ClientConfig, ModeConfig, PowerSaveMode, WifiController};
 use esp32::motor::Motor;
 use postcard::{experimental::max_size::MaxSize, from_bytes, to_slice};
 use static_cell::StaticCell;
@@ -89,12 +89,13 @@ async fn main(spawner: Spawner) -> ! {
     let config = ModeConfig::Client(client_config);
 
     wifi_controller.set_config(&config).unwrap();
+    wifi_controller.set_power_saving(PowerSaveMode::None).unwrap();
 
     let rng = rng::Rng::new();
 
     let random_seed = rng.random() as u64 | (rng.random() as u64) << 32;
 
-    static RESOURCES: StaticCell<embassy_net::StackResources<4>> = StaticCell::new();
+    static RESOURCES: StaticCell<embassy_net::StackResources<8>> = StaticCell::new();
 
     let (stack, runner) = embassy_net::new(
         interfaces.sta,
@@ -198,10 +199,9 @@ async fn main(spawner: Spawner) -> ! {
         .spawn(drive(stack, motor_right, motor_left, interval, &ID))
         .unwrap();
 
-    spawner.spawn(monitor(stack, interval, &ID)).unwrap();
+    spawner.spawn(monitor(stack, wifi_controller, interval, &ID)).unwrap();
 
     loop {
-        
         Timer::after_secs(3600).await;
     }
 }
@@ -265,7 +265,7 @@ async fn drive(
 }
 
 #[embassy_executor::task]
-async fn monitor(stack: Stack<'static>, interval: u64, id: &'static OnceLock<u8>) {
+async fn monitor(stack: Stack<'static>, mut wifi_controller: WifiController<'static>, interval: u64, id: &'static OnceLock<u8>) {
     let mut ip_address = [0; 4];
     for (i, s) in SERVER_IP.split(".").enumerate() {
         ip_address[i] = s.parse().unwrap();
@@ -277,10 +277,11 @@ async fn monitor(stack: Stack<'static>, interval: u64, id: &'static OnceLock<u8>
     let endpoint = (ip_address, RECEIVE_PORT.parse::<u16>().unwrap());
     
     loop {
-        let mut tx_buffer = [0 as u8; 1024 * 2];
+        println!("MAKE");
+        let mut tx_buffer = [0 as u8; 20];
         let mut rx_buffer = [];
     
-        let mut tx_meta = [PacketMetadata::EMPTY; 16];
+        let mut tx_meta = [PacketMetadata::EMPTY; 3];
         let mut rx_meta = [];
         
         let mut socket = UdpSocket::new(
@@ -312,6 +313,13 @@ async fn monitor(stack: Stack<'static>, interval: u64, id: &'static OnceLock<u8>
                     .unwrap();
             } else {
                 println!("UDP may_send() == false; transmit buffer full or socket not ready");
+                dbg!(stack.is_link_up());
+                dbg!(stack.is_config_up());
+                wifi_controller.stop_async().await.unwrap();
+                println!("WiFi controller stopped");
+                wifi_controller.start_async().await.unwrap();
+                println!("WiFi controller started");
+                wifi_controller.connect_async().await.unwrap();
                 break;
             }
             heartbeat.next().await;
