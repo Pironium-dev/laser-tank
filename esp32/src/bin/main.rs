@@ -7,9 +7,9 @@
 )]
 #![deny(clippy::large_stack_frames)]
 
-use communication::{ServerData, RobotMethod, RobotRespond};
+use communication::{RobotMethod, RobotRespond, ServerData};
 use embassy_executor::Spawner;
-use embassy_futures::select::{Either, select};
+use embassy_futures::{select::{Either, select}, yield_now};
 use embassy_net::{
     self, Runner, Stack,
     udp::{PacketMetadata, UdpMetadata, UdpSocket},
@@ -201,6 +201,7 @@ async fn main(spawner: Spawner) -> ! {
     spawner.spawn(monitor(stack, interval, &ID)).unwrap();
 
     loop {
+        
         Timer::after_secs(3600).await;
     }
 }
@@ -223,7 +224,7 @@ async fn drive(
     let mut rx_buffer = [0 as u8; 1024 * 2];
     let mut tx_buffer = [];
 
-    let mut rx_meta = [PacketMetadata::EMPTY; 3];
+    let mut rx_meta = [PacketMetadata::EMPTY; 16];
     let mut tx_meta = [];
 
     let mut socket = UdpSocket::new(
@@ -239,23 +240,22 @@ async fn drive(
     let mut buf = [0; ServerData::POSTCARD_MAX_SIZE];
 
     loop {
+        yield_now().await;
         match with_timeout(interval, socket.recv_from(&mut buf)).await {
             Ok(result) => match result {
-                Ok((x, _)) => {
-                    match from_bytes(&buf[..x]).unwrap() {
-                        ServerData::Controller(c) => {
-                            motor_left.set_velocity(c.left_stick);
-                            motor_right.set_velocity(c.right_stick);
-                        }
-                        ServerData::SetID(new_id) => {
-                            println!("ID: {new_id}");
-                            let _ = id.init(new_id);
-                        }
+                Ok((x, _)) => match from_bytes(&buf[..x]).unwrap() {
+                    ServerData::Controller(c) => {
+                        motor_left.set_velocity(c.left_stick);
+                        motor_right.set_velocity(c.right_stick);
                     }
-                }
+                    ServerData::SetID(new_id) => {
+                        println!("ID: {new_id}");
+                        let _ = id.init(new_id);
+                    }
+                },
                 Err(_x) => {}
-            }
-            
+            },
+
             Err(_) => {
                 motor_right.set_velocity(0.0);
                 motor_left.set_velocity(0.0);
@@ -275,44 +275,46 @@ async fn monitor(stack: Stack<'static>, interval: u64, id: &'static OnceLock<u8>
         embassy_net::IpAddress::v4(ip_address[0], ip_address[1], ip_address[2], ip_address[3]);
 
     let endpoint = (ip_address, RECEIVE_PORT.parse::<u16>().unwrap());
-
-    let mut tx_buffer = [0 as u8; 1024 * 2];
-    let mut rx_buffer = [];
-
-    let mut tx_meta = [PacketMetadata::EMPTY; 3];
-    let mut rx_meta = [];
-
-    let mut socket = UdpSocket::new(
-        stack,
-        &mut rx_meta,
-        &mut rx_buffer,
-        &mut tx_meta,
-        &mut tx_buffer,
-    );
-
-    socket.bind(SEND_PORT.parse::<u16>().unwrap()).unwrap();
-
-    let mut buf = [0; RobotRespond::POSTCARD_MAX_SIZE];
-
-    let mut heartbeat = Ticker::every(Duration::from_millis(interval));
+    
     loop {
-        let respond = {
-            RobotRespond {
-                id: {
-                    if id.is_set() {
-                        *(id.get().await)
-                    } else {
-                        0
-                    }
-                },
-                method: RobotMethod::HeartBeat,
+        let mut tx_buffer = [0 as u8; 1024 * 2];
+        let mut rx_buffer = [];
+    
+        let mut tx_meta = [PacketMetadata::EMPTY; 16];
+        let mut rx_meta = [];
+        
+        let mut socket = UdpSocket::new(
+            stack,
+            &mut rx_meta,
+            &mut rx_buffer,
+            &mut tx_meta,
+            &mut tx_buffer,
+        );
+    
+        socket.bind(SEND_PORT.parse::<u16>().unwrap()).unwrap();
+    
+        let mut buf = [0; RobotRespond::POSTCARD_MAX_SIZE];
+    
+        let mut heartbeat = Ticker::every(Duration::from_millis(interval));
+        loop {
+            yield_now().await;
+            let respond = {
+                RobotRespond {
+                    id: { if id.is_set() { *(id.get().await) } else { 0 } },
+                    method: RobotMethod::HeartBeat,
+                }
+            };
+            
+            if socket.may_send() {
+                socket
+                    .send_to(to_slice(&respond, &mut buf).unwrap(), endpoint)
+                    .await
+                    .unwrap();
+            } else {
+                println!("UDP may_send() == false; transmit buffer full or socket not ready");
+                break;
             }
-        };
-
-        if socket.may_send() {
-            println!("SEND");
-            socket.send_to(to_slice(&respond, &mut buf).unwrap(), endpoint).await.unwrap();
+            heartbeat.next().await;
         }
-        heartbeat.next().await;
     }
 }
