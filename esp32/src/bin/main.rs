@@ -124,7 +124,7 @@ async fn main(spawner: Spawner) -> ! {
 
     let mut mcpwm = McPwm::new(peripherals.MCPWM0, clock_cfg);
     let timer_clock_cfg = clock_cfg
-        .timer_clock_with_frequency(99, PwmWorkingMode::Increase, Rate::from_khz(10))
+        .timer_clock_with_frequency(99, PwmWorkingMode::Increase, Rate::from_khz(5))
         .unwrap();
     mcpwm.timer0.start(timer_clock_cfg);
 
@@ -238,6 +238,9 @@ async fn drive(
     socket.bind(RECEIVE_PORT.parse::<u16>().unwrap()).unwrap();
 
     let mut buf = [0; ServerData::POSTCARD_MAX_SIZE];
+    
+    let mut left_velocity = 0.0f32;
+    let mut right_velocity = 0.0f32;
 
     loop {
         yield_now().await;
@@ -245,8 +248,8 @@ async fn drive(
             Ok(result) => match result {
                 Ok((x, _)) => match from_bytes(&buf[..x]).unwrap() {
                     ServerData::Controller(c) => {
-                        motor_left.set_velocity(c.left_stick);
-                        motor_right.set_velocity(c.right_stick);
+                        motor_left.set_velocity(ease_motor(&mut left_velocity, c.left_stick));
+                        motor_right.set_velocity(ease_motor(&mut right_velocity, c.right_stick));
                     }
                     ServerData::SetID(new_id) => {
                         println!("ID: {new_id}");
@@ -325,4 +328,10 @@ async fn monitor(stack: Stack<'static>, mut wifi_controller: WifiController<'sta
             heartbeat.next().await;
         }
     }
+}
+
+fn ease_motor(past: &mut f32, current: f32) -> f32 {
+    let delta = (current - *past) * 0.8;
+    *past += delta;
+    *past
 }
