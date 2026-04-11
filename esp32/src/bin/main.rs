@@ -9,7 +9,10 @@
 
 use communication::{RobotMethod, RobotRespond, ServerData};
 use embassy_executor::Spawner;
-use embassy_futures::{select::{Either, select}, yield_now};
+use embassy_futures::{
+    select::{Either, select},
+    yield_now,
+};
 use embassy_net::{
     self, Runner, Stack,
     udp::{PacketMetadata, UdpMetadata, UdpSocket},
@@ -89,7 +92,9 @@ async fn main(spawner: Spawner) -> ! {
     let config = ModeConfig::Client(client_config);
 
     wifi_controller.set_config(&config).unwrap();
-    wifi_controller.set_power_saving(PowerSaveMode::None).unwrap();
+    wifi_controller
+        .set_power_saving(PowerSaveMode::None)
+        .unwrap();
 
     let rng = rng::Rng::new();
 
@@ -199,7 +204,9 @@ async fn main(spawner: Spawner) -> ! {
         .spawn(drive(stack, motor_right, motor_left, interval, &ID))
         .unwrap();
 
-    spawner.spawn(monitor(stack, wifi_controller, interval, &ID)).unwrap();
+    spawner
+        .spawn(monitor(stack, wifi_controller, interval, &ID))
+        .unwrap();
 
     loop {
         Timer::after_secs(3600).await;
@@ -238,7 +245,7 @@ async fn drive(
     socket.bind(RECEIVE_PORT.parse::<u16>().unwrap()).unwrap();
 
     let mut buf = [0; ServerData::POSTCARD_MAX_SIZE];
-    
+
     let mut left_velocity = 0.0f32;
     let mut right_velocity = 0.0f32;
 
@@ -268,7 +275,12 @@ async fn drive(
 }
 
 #[embassy_executor::task]
-async fn monitor(stack: Stack<'static>, mut wifi_controller: WifiController<'static>, interval: u64, id: &'static OnceLock<u8>) {
+async fn monitor(
+    stack: Stack<'static>,
+    mut wifi_controller: WifiController<'static>,
+    interval: u64,
+    id: &'static OnceLock<u8>,
+) {
     let mut ip_address = [0; 4];
     for (i, s) in SERVER_IP.split(".").enumerate() {
         ip_address[i] = s.parse().unwrap();
@@ -278,15 +290,15 @@ async fn monitor(stack: Stack<'static>, mut wifi_controller: WifiController<'sta
         embassy_net::IpAddress::v4(ip_address[0], ip_address[1], ip_address[2], ip_address[3]);
 
     let endpoint = (ip_address, RECEIVE_PORT.parse::<u16>().unwrap());
-    
+
     loop {
         println!("MAKE");
         let mut tx_buffer = [0 as u8; 20];
         let mut rx_buffer = [];
-    
+
         let mut tx_meta = [PacketMetadata::EMPTY; 3];
         let mut rx_meta = [];
-        
+
         let mut socket = UdpSocket::new(
             stack,
             &mut rx_meta,
@@ -294,11 +306,11 @@ async fn monitor(stack: Stack<'static>, mut wifi_controller: WifiController<'sta
             &mut tx_meta,
             &mut tx_buffer,
         );
-    
+
         socket.bind(SEND_PORT.parse::<u16>().unwrap()).unwrap();
-    
+
         let mut buf = [0; RobotRespond::POSTCARD_MAX_SIZE];
-    
+
         let mut heartbeat = Ticker::every(Duration::from_millis(interval));
         loop {
             yield_now().await;
@@ -308,7 +320,7 @@ async fn monitor(stack: Stack<'static>, mut wifi_controller: WifiController<'sta
                     method: RobotMethod::HeartBeat,
                 }
             };
-            
+
             if socket.may_send() {
                 socket
                     .send_to(to_slice(&respond, &mut buf).unwrap(), endpoint)

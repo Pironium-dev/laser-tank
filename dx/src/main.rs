@@ -3,7 +3,7 @@ use gilrs;
 use postcard::{experimental::max_size::MaxSize, from_bytes, to_slice};
 use std::{
     net::SocketAddr,
-    sync::{Arc, Mutex}
+    sync::{Arc, Mutex},
 };
 use tokio::{
     self,
@@ -67,9 +67,7 @@ async fn main() {
 
         let mut handlers: [Option<RobotHandler>; 2] = [None, None];
 
-        let mut ticker = time::interval(Duration::from_millis(
-            INTERVAL.parse::<u64>().unwrap(),
-        ));
+        let mut ticker = time::interval(Duration::from_millis(INTERVAL.parse::<u64>().unwrap()));
 
         loop {
             tokio::select! {
@@ -102,7 +100,7 @@ async fn main() {
                             continue;
                         }
                     }
-                    
+
                     if message.id >= 1 && message.id <= 2 {
                         let idx = (message.id - 1) as usize;
                         if let Some(ref mut h) = handlers[idx] {
@@ -154,7 +152,7 @@ impl RobotHandler {
         let heartbeat_timeout = Duration::from_millis(INTERVAL.parse::<u64>().unwrap() * 10);
 
         let send_addr = SocketAddr::new(addr.ip(), RECEIVE_PORT.parse().unwrap());
-        
+
         Self {
             id,
             recv_addr: addr,
@@ -186,7 +184,11 @@ impl RobotHandler {
         let mut buf = [0; communication::ServerData::POSTCARD_MAX_SIZE];
         let data = {
             let controller = self.controller.lock().unwrap();
-            to_slice(&communication::ServerData::Controller(*controller), &mut buf).unwrap()
+            to_slice(
+                &communication::ServerData::Controller(*controller),
+                &mut buf,
+            )
+            .unwrap()
         };
         self.socket.send_to(data, self.send_addr).await.unwrap();
     }
