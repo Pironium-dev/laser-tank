@@ -45,8 +45,8 @@ async fn main() {
                         }
                     }
                     gilrs::EventType::AxisChanged(axis, x, _) => match axis {
-                        gilrs::Axis::LeftStickY => controller.left_stick = x,
-                        gilrs::Axis::RightStickY => controller.right_stick = x,
+                        gilrs::Axis::LeftStickX => controller.stick.0 = x as i8,
+                        gilrs::Axis::LeftStickY => controller.stick.1 = x as i8,
                         _ => {}
                     },
                     _ => {}
@@ -79,19 +79,19 @@ async fn main() {
                     id = 0 でも addrを知っている => addrを再通知
                     id = 1 or 2 続行
                     */
-                    if message.id == 0 {
+                    if message.robot_id == 0 {
                         if let Some(idx) = handlers.iter().position(|h| h.as_ref().is_some_and(|h| h.recv_addr == addr)) {
                             println!("OK (Reconnecting)");
                             let h = handlers[idx].as_ref().unwrap();
                             h.notify_id().await;
-                            message.id = (idx + 1) as u8;
+                            message.robot_id = (idx + 1) as u8;
                             continue;
                         } else if let Some(idx) = handlers.iter().position(|h| h.is_none()) {
                             println!("OK (New Connection)");
                             let h = RobotHandler::new((idx + 1) as u8, addr, socket.clone(), controllers[idx].clone());
                             h.notify_id().await;
                             handlers[idx] = Some(h);
-                            message.id = (idx + 1) as u8;
+                            message.robot_id = (idx + 1) as u8;
                             let mut controller = controllers[idx].lock().unwrap();
                             controller.shot = 0;
                             continue;
@@ -101,8 +101,8 @@ async fn main() {
                         }
                     }
 
-                    if message.id >= 1 && message.id <= 2 {
-                        let idx = (message.id - 1) as usize;
+                    if message.robot_id >= 1 && message.robot_id <= 2 {
+                        let idx = (message.robot_id - 1) as usize;
                         if let Some(ref mut h) = handlers[idx] {
                             h.recv_heatbeat();
                             continue

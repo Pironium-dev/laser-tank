@@ -11,19 +11,12 @@ pub enum ServerData {
 
 #[derive(Serialize, Deserialize, MaxSize, Debug, Clone, Copy, Default)]
 pub struct ControllerState {
-    pub left_stick: f32,
-    pub right_stick: f32,
+    pub stick: (i8, i8),
     pub shot: u8,
 }
 
 #[derive(Serialize, Deserialize, MaxSize, Debug)]
 pub struct RobotRespond {
-    pub id: u8,
-    pub method: RobotMethod,
-}
-
-#[derive(Serialize, Deserialize, MaxSize, Debug)]
-pub enum RobotMethod {
-    HeartBeat,
-    Hit(u8),
+    pub robot_id: u8,
+    pub shot_id: u8,
 }
