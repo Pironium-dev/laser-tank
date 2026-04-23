@@ -7,25 +7,27 @@
 )]
 #![deny(clippy::large_stack_frames)]
 
-use communication::{RobotMethod, RobotRespond, ServerData};
+use communication::{RobotRespond, ServerData, detect_id_change};
+use core::sync::atomic::{AtomicU8, Ordering};
 use embassy_executor::Spawner;
-use embassy_futures::{
-    select::{Either, select},
-    yield_now,
-};
+use embassy_futures::yield_now;
 use embassy_net::{
     self, Runner, Stack,
-    udp::{PacketMetadata, UdpMetadata, UdpSocket},
+    udp::{PacketMetadata, UdpSocket},
 };
 use embassy_sync::once_lock::OnceLock;
 use embassy_time::{Duration, Ticker, Timer, with_timeout};
 use esp_hal::{
+    Async,
     clock::CpuClock,
     gpio::{Level, Output, OutputConfig},
     mcpwm::{McPwm, PeripheralClockConfig, operator::PwmPinConfig, timer::PwmWorkingMode},
     peripherals::MCPWM0,
-    rmt::{PulseCode, Rmt, RxChannelConfig, RxChannelCreator, TxChannelConfig, TxChannelCreator},
-    rng,
+    rmt::{
+        Channel, PulseCode, Rmt, Rx, RxChannelConfig, RxChannelCreator, Tx, TxChannelConfig,
+        TxChannelCreator,
+    },
+    rng, time,
     time::Rate,
     timer::timg::TimerGroup,
 };
@@ -59,6 +61,7 @@ const SERVER_IP: &str = env!("SERVER_IP");
 const RECEIVE_PORT: &str = env!("RECEIVE_PORT");
 const SEND_PORT: &str = env!("SEND_PORT");
 const INTERVAL: &str = env!("INTERVAL");
+const IR_RANGE: u64 = 8;
 
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
@@ -133,14 +136,14 @@ async fn main(spawner: Spawner) -> ! {
         .unwrap();
     mcpwm.timer0.start(timer_clock_cfg);
 
-    let mut motor_right = Motor::new(
+    let motor_right = Motor::new(
         mcpwm
             .operator0
             .with_pin_a(peripherals.GPIO33, PwmPinConfig::UP_ACTIVE_HIGH),
         Output::new(peripherals.GPIO32, Level::Low, OutputConfig::default()),
     );
 
-    let mut motor_left = Motor::new(
+    let motor_left = Motor::new(
         mcpwm
             .operator1
             .with_pin_a(peripherals.GPIO26, PwmPinConfig::UP_ACTIVE_HIGH),
@@ -150,8 +153,6 @@ async fn main(spawner: Spawner) -> ! {
     // timer等の設定
 
     let interval = INTERVAL.parse().unwrap();
-
-    let mut timeout = Ticker::every(Duration::from_millis(interval * 10));
 
     // rmtの設定
 
@@ -169,30 +170,23 @@ async fn main(spawner: Spawner) -> ! {
 
     let rx_config = RxChannelConfig::default()
         .with_clk_divider(80)
-        .with_idle_threshold(10000)
+        .with_idle_threshold(6000)
         .with_filter_threshold(10);
 
-    let mut tx_data = [PulseCode::new(Level::High, 50, Level::Low, 50); 3];
-    tx_data[2] = PulseCode::end_marker();
-
-    let mut rx_data = [PulseCode::end_marker(); 5];
-
-    let mut tx_channel = rmt
+    let tx_channel = rmt
         .channel0
         .configure_tx(peripherals.GPIO13, tx_config)
         .unwrap();
-    let mut rx_channel = rmt
+    let rx_channel = rmt
         .channel1
         .configure_rx(peripherals.GPIO23, rx_config)
         .unwrap();
 
     // その他色々
 
-    let mut shot_id: u8 = 0;
-
-    let mut buf = [0 as u8; RobotRespond::POSTCARD_MAX_SIZE];
-
     static ID: OnceLock<u8> = OnceLock::new();
+
+    static HIT_ID: AtomicU8 = AtomicU8::new(0);
 
     /*
     task1 socketのコントロール、udp送信
@@ -201,12 +195,21 @@ async fn main(spawner: Spawner) -> ! {
     */
 
     spawner
-        .spawn(drive(stack, motor_right, motor_left, interval, &ID))
+        .spawn(drive(
+            stack,
+            motor_right,
+            motor_left,
+            tx_channel,
+            interval,
+            &ID,
+        ))
         .unwrap();
 
     spawner
-        .spawn(monitor(stack, wifi_controller, interval, &ID))
+        .spawn(monitor(stack, wifi_controller, interval, &ID, &HIT_ID))
         .unwrap();
+
+    spawner.spawn(recv_ir(rx_channel, &HIT_ID)).unwrap();
 
     loop {
         Timer::after_secs(3600).await;
@@ -219,10 +222,46 @@ async fn start_wifi(mut runner: Runner<'static, esp_radio::wifi::WifiDevice<'sta
 }
 
 #[embassy_executor::task]
+async fn recv_ir(mut rx_channel: Channel<'static, Async, Rx>, hit_id: &'static AtomicU8) {
+    let mut time = time::Instant::now();
+    let mut last_hit = time::Instant::now();
+
+    let duration = time::Duration::from_millis(INTERVAL.parse().unwrap());
+
+    let least_duration = duration - time::Duration::from_millis(IR_RANGE);
+    let max_duration = duration + time::Duration::from_millis(IR_RANGE);
+
+    println!("{}, {}", least_duration, max_duration);
+
+    loop {
+        let mut rx_data = [PulseCode::end_marker(); 10];
+
+        match rx_channel.receive(&mut rx_data).await {
+            Ok(_) => {
+                let elapsed = time.elapsed();
+                if least_duration <= elapsed
+                    && elapsed <= max_duration
+                    && last_hit.elapsed() > duration * 4
+                {
+                    println!("HIT!!");
+                    last_hit = time;
+                    hit_id.fetch_add(1, Ordering::Relaxed);
+                }
+                time = time::Instant::now();
+            }
+            Err(_) => {
+                println!("ERROR");
+            }
+        }
+    }
+}
+
+#[embassy_executor::task]
 async fn drive(
     stack: Stack<'static>,
     mut motor_right: Motor<'static, MCPWM0<'static>, 0>,
     mut motor_left: Motor<'static, MCPWM0<'static>, 1>,
+    mut tx_channel: Channel<'static, Async, Tx>,
     interval: u64,
     id: &'static OnceLock<u8>,
 ) {
@@ -249,18 +288,56 @@ async fn drive(
     let mut left_velocity = 0.0f32;
     let mut right_velocity = 0.0f32;
 
+    let mut shot_id = 0u8;
+
+    const ON: PulseCode = PulseCode::new(Level::High, 600, Level::Low, 600);
+    //const OFF: PulseCode = PulseCode::new(Level::High, 500, Level::Low, 1500);
+
+    let mut ir_tx_data = [PulseCode::end_marker(); 3];
+    ir_tx_data[0] = PulseCode::new(Level::High, 3000, Level::Low, 3000);
+    ir_tx_data[1] = ON;
+
+    let mut shot_times = 0;
+
     loop {
         yield_now().await;
         match with_timeout(interval, socket.recv_from(&mut buf)).await {
             Ok(result) => match result {
                 Ok((x, _)) => match from_bytes(&buf[..x]).unwrap() {
                     ServerData::Controller(c) => {
-                        motor_left.set_velocity(ease_motor(&mut left_velocity, c.left_stick));
-                        motor_right.set_velocity(ease_motor(&mut right_velocity, c.right_stick));
+                        const MAX: f32 = 1.0;
+                        const MIN: f32 = 0.0;
+                        const MID: f32 = 0.8;
+                        const DATA: [(i8, i8, f32, f32); 9] = [
+                            (0, 0, MIN, MIN),
+                            (1, 0, -MAX, MAX),
+                            (0, 1, -MAX, -MAX),
+                            (1, 1, -MAX, -MID),
+                            (-1, 0, MAX, -MAX),
+                            (0, -1, MAX, MAX),
+                            (-1, 1, -MID, -MAX),
+                            (1, -1, MAX, MID),
+                            (-1, -1, MID, MAX),
+                        ];
+                        for (lx, rx, lv, rv) in DATA {
+                            if c.stick.0 == lx && c.stick.1 == rx {
+                                motor_left.set_velocity(ease_motor(&mut left_velocity, lv));
+                                motor_right.set_velocity(ease_motor(&mut right_velocity, rv));
+                                break;
+                            }
+                        }
+
+                        if detect_id_change(&mut shot_id, c.shot_id) {
+                            println!("SHOT: {}", c.shot_id);
+                            shot_times = 3;
+                        }
                     }
                     ServerData::SetID(new_id) => {
                         println!("ID: {new_id}");
-                        let _ = id.init(new_id);
+                        if !id.is_set() {
+                            id.init(new_id).unwrap();
+                        }
+                        shot_id = 0;
                     }
                 },
                 Err(_x) => {}
@@ -271,7 +348,17 @@ async fn drive(
                 motor_left.set_velocity(0.0);
             }
         }
+        if shot_times > 0 {
+            tx_channel.transmit(&ir_tx_data).await.unwrap();
+            shot_times -= 1;
+        }
     }
+}
+
+fn ease_motor(past: &mut f32, current: f32) -> f32 {
+    let delta = (current - *past) * 0.3;
+    *past += delta;
+    *past
 }
 
 #[embassy_executor::task]
@@ -280,6 +367,7 @@ async fn monitor(
     mut wifi_controller: WifiController<'static>,
     interval: u64,
     id: &'static OnceLock<u8>,
+    hit_id: &'static AtomicU8,
 ) {
     let mut ip_address = [0; 4];
     for (i, s) in SERVER_IP.split(".").enumerate() {
@@ -316,8 +404,8 @@ async fn monitor(
             yield_now().await;
             let respond = {
                 RobotRespond {
-                    id: { if id.is_set() { *(id.get().await) } else { 0 } },
-                    method: RobotMethod::HeartBeat,
+                    robot_id: { if id.is_set() { *(id.get().await) } else { 0 } },
+                    hit_id: hit_id.load(Ordering::Relaxed),
                 }
             };
 
@@ -340,10 +428,4 @@ async fn monitor(
             heartbeat.next().await;
         }
     }
-}
-
-fn ease_motor(past: &mut f32, current: f32) -> f32 {
-    let delta = (current - *past) * 0.8;
-    *past += delta;
-    *past
 }

@@ -18,6 +18,6 @@ impl<'a, T: PwmPeripheral, const X: u8> Motor<'_, T, X> {
         } else {
             self.phase.set_high();
         }
-        self.pin.set_timestamp((v.abs() * 100.0) as u16)
+        self.pin.set_timestamp((v.abs() * 100.0) as u16);
     }
 }
