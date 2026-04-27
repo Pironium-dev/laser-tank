@@ -294,7 +294,7 @@ async fn drive(
     //const OFF: PulseCode = PulseCode::new(Level::High, 500, Level::Low, 1500);
 
     let mut ir_tx_data = [PulseCode::end_marker(); 3];
-    ir_tx_data[0] = PulseCode::new(Level::High, 3000, Level::Low, 3000);
+    ir_tx_data[0] = PulseCode::new(Level::High, 20000, Level::Low, 3000);
     ir_tx_data[1] = ON;
 
     let mut shot_times = 0;
@@ -418,6 +418,7 @@ async fn monitor(
                 println!("UDP may_send() == false; transmit buffer full or socket not ready");
                 dbg!(stack.is_link_up());
                 dbg!(stack.is_config_up());
+                hit_id.store(0, Ordering::Relaxed);
                 wifi_controller.stop_async().await.unwrap();
                 println!("WiFi controller stopped");
                 wifi_controller.start_async().await.unwrap();
