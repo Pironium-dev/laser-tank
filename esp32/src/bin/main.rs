@@ -232,8 +232,6 @@ async fn recv_ir(mut rx_channel: Channel<'static, Async, Rx>, hit_id: &'static A
     let least_duration = duration - time::Duration::from_millis(IR_RANGE);
     let max_duration = duration + time::Duration::from_millis(IR_RANGE);
 
-    println!("{}, {}", least_duration, max_duration);
-
     loop {
         let mut rx_data = [PulseCode::end_marker(); 10];
 
@@ -310,6 +308,7 @@ async fn drive(
             Ok(result) => match result {
                 Ok((x, _)) => match from_bytes(&buf[..x]).unwrap() {
                     ServerData::Controller(c) => {
+                        dbg!(c);
                         const MAX: f32 = 1.0;
                         const MIN: f32 = 0.0;
                         const MID: f32 = 0.8;
@@ -333,7 +332,6 @@ async fn drive(
                         }
 
                         if detect_id_change(&mut shot_id, c.shot_id) {
-                            println!("SHOT: {}", c.shot_id);
                             shot_times = SHOT_TIMES;
                         }
                     }
@@ -385,7 +383,6 @@ async fn monitor(
     let endpoint = (ip_address, RECEIVE_PORT.parse::<u16>().unwrap());
 
     loop {
-        println!("MAKE");
         let mut tx_buffer = [0 as u8; 20];
         let mut rx_buffer = [];
 
