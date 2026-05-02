@@ -62,6 +62,7 @@ const RECEIVE_PORT: &str = env!("RECEIVE_PORT");
 const SEND_PORT: &str = env!("SEND_PORT");
 const INTERVAL: &str = env!("INTERVAL");
 const IR_RANGE: u64 = 8;
+const SHOT_TIMES: u8 = 8;
 
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
@@ -170,7 +171,7 @@ async fn main(spawner: Spawner) -> ! {
 
     let rx_config = RxChannelConfig::default()
         .with_clk_divider(80)
-        .with_idle_threshold(6000)
+        .with_idle_threshold(600)
         .with_filter_threshold(10);
 
     let tx_channel = rmt
@@ -237,11 +238,15 @@ async fn recv_ir(mut rx_channel: Channel<'static, Async, Rx>, hit_id: &'static A
         let mut rx_data = [PulseCode::end_marker(); 10];
 
         match rx_channel.receive(&mut rx_data).await {
-            Ok(_) => {
+            Ok(l) => {
+                println!("{l} {:?}", rx_data);
+                // if rx_data[0].length1() <= 350 && rx_data[0].length2() == 0 {
+                //     continue;
+                // }
                 let elapsed = time.elapsed();
                 if least_duration <= elapsed
                     && elapsed <= max_duration
-                    && last_hit.elapsed() > duration * 4
+                    && last_hit.elapsed() > duration * (SHOT_TIMES as u32 + 1)
                 {
                     println!("HIT!!");
                     last_hit = time;
@@ -290,12 +295,12 @@ async fn drive(
 
     let mut shot_id = 0u8;
 
-    const ON: PulseCode = PulseCode::new(Level::High, 600, Level::Low, 600);
-    //const OFF: PulseCode = PulseCode::new(Level::High, 500, Level::Low, 1500);
+    const ON: PulseCode = PulseCode::new(Level::High, 1000, Level::Low, 1000);
+    const OFF: PulseCode = PulseCode::new(Level::High, 1000, Level::Low, 1000);
 
-    let mut ir_tx_data = [PulseCode::end_marker(); 3];
-    ir_tx_data[0] = PulseCode::new(Level::High, 20000, Level::Low, 3000);
-    ir_tx_data[1] = ON;
+    let mut ir_tx_data = [ON; 4];
+    ir_tx_data[1] = OFF;
+    ir_tx_data[3] = PulseCode::end_marker();
 
     let mut shot_times = 0;
 
@@ -329,7 +334,7 @@ async fn drive(
 
                         if detect_id_change(&mut shot_id, c.shot_id) {
                             println!("SHOT: {}", c.shot_id);
-                            shot_times = 3;
+                            shot_times = SHOT_TIMES;
                         }
                     }
                     ServerData::SetID(new_id) => {
@@ -356,7 +361,7 @@ async fn drive(
 }
 
 fn ease_motor(past: &mut f32, current: f32) -> f32 {
-    let delta = (current - *past) * 0.3;
+    let delta = (current - *past) * 0.2;
     *past += delta;
     *past
 }
@@ -419,11 +424,22 @@ async fn monitor(
                 dbg!(stack.is_link_up());
                 dbg!(stack.is_config_up());
                 hit_id.store(0, Ordering::Relaxed);
-                wifi_controller.stop_async().await.unwrap();
-                println!("WiFi controller stopped");
-                wifi_controller.start_async().await.unwrap();
-                println!("WiFi controller started");
-                wifi_controller.connect_async().await.unwrap();
+                loop {
+                    if wifi_controller.stop_async().await.is_err() {
+                        continue;
+                    }
+                    println!("WiFi controller stopped");
+                    if wifi_controller.start_async().await.is_err() {
+                        continue;
+                    }
+                    println!("WiFi controller started");
+                    if wifi_controller.connect_async().await.is_err() {
+                        continue;
+                    }
+                    println!("Connect!");
+                    break;
+                }
+
                 break;
             }
             heartbeat.next().await;
