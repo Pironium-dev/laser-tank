@@ -27,7 +27,7 @@ use esp_hal::{
         Channel, PulseCode, Rmt, Rx, RxChannelConfig, RxChannelCreator, Tx, TxChannelConfig,
         TxChannelCreator,
     },
-    rng, time,
+    rng,
     time::Rate,
     timer::timg::TimerGroup,
 };
@@ -61,8 +61,8 @@ const SERVER_IP: &str = env!("SERVER_IP");
 const RECEIVE_PORT: &str = env!("RECEIVE_PORT");
 const SEND_PORT: &str = env!("SEND_PORT");
 const INTERVAL: &str = env!("INTERVAL");
-const IR_RANGE: u64 = 8;
-const SHOT_TIMES: u8 = 8;
+const IR_RANGE: u16 = 50;
+const IR_MID: u16 = 300;
 
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
@@ -163,15 +163,14 @@ async fn main(spawner: Spawner) -> ! {
     let tx_config = TxChannelConfig::default()
         .with_clk_divider(80)
         .with_carrier_modulation(true)
-        .with_carrier_high(13)
-        .with_carrier_low(13)
+        .with_carrier_high(1052)
+        .with_carrier_low(1052)
         .with_carrier_level(Level::High)
         .with_idle_output(true)
         .with_idle_output_level(Level::Low);
 
     let rx_config = RxChannelConfig::default()
-        .with_clk_divider(80)
-        .with_idle_threshold(600)
+        .with_idle_threshold(2000)
         .with_filter_threshold(10);
 
     let tx_channel = rmt
@@ -224,39 +223,37 @@ async fn start_wifi(mut runner: Runner<'static, esp_radio::wifi::WifiDevice<'sta
 
 #[embassy_executor::task]
 async fn recv_ir(mut rx_channel: Channel<'static, Async, Rx>, hit_id: &'static AtomicU8) {
-    let mut time = time::Instant::now();
-    let mut last_hit = time::Instant::now();
-
-    let duration = time::Duration::from_millis(INTERVAL.parse().unwrap());
-
-    let least_duration = duration - time::Duration::from_millis(IR_RANGE);
-    let max_duration = duration + time::Duration::from_millis(IR_RANGE);
 
     loop {
-        let mut rx_data = [PulseCode::end_marker(); 10];
+        let mut rx_data = [PulseCode::end_marker(); 5];
 
         match rx_channel.receive(&mut rx_data).await {
             Ok(l) => {
                 println!("{l} {:?}", rx_data);
-                // if rx_data[0].length1() <= 350 && rx_data[0].length2() == 0 {
-                //     continue;
-                // }
-                let elapsed = time.elapsed();
-                if least_duration <= elapsed
-                    && elapsed <= max_duration
-                    && last_hit.elapsed() > duration * (SHOT_TIMES as u32 + 1)
-                {
-                    println!("HIT!!");
-                    last_hit = time;
-                    hit_id.fetch_add(1, Ordering::Relaxed);
+                if l == 3 {
+                    let mut flag = true;
+                    for i in 0..3 {
+                        if check_length(rx_data[i].length1()) || check_length(rx_data[i].length1())
+                        {
+                            flag = false;
+                            break;
+                        }
+                    }
+                    if flag {
+                        hit_id.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
-                time = time::Instant::now();
             }
             Err(_) => {
                 println!("ERROR");
             }
         }
     }
+}
+
+fn check_length(l: u16) -> bool {
+    // trueならerror
+    !((IR_MID - IR_RANGE <= l && l <= IR_MID + IR_RANGE) || l == 0)
 }
 
 #[embassy_executor::task]
@@ -293,14 +290,8 @@ async fn drive(
 
     let mut shot_id = 0u8;
 
-    const ON: PulseCode = PulseCode::new(Level::High, 1000, Level::Low, 1000);
-    const OFF: PulseCode = PulseCode::new(Level::High, 1000, Level::Low, 1000);
-
-    let mut ir_tx_data = [ON; 4];
-    ir_tx_data[1] = OFF;
+    let mut ir_tx_data = [PulseCode::new(Level::High, 1000, Level::Low, 1000); 4];
     ir_tx_data[3] = PulseCode::end_marker();
-
-    let mut shot_times = 0;
 
     loop {
         yield_now().await;
@@ -308,7 +299,6 @@ async fn drive(
             Ok(result) => match result {
                 Ok((x, _)) => match from_bytes(&buf[..x]).unwrap() {
                     ServerData::Controller(c) => {
-                        dbg!(c);
                         const MAX: f32 = 1.0;
                         const MIN: f32 = 0.0;
                         const MID: f32 = 0.8;
@@ -332,7 +322,7 @@ async fn drive(
                         }
 
                         if detect_id_change(&mut shot_id, c.shot_id) {
-                            shot_times = SHOT_TIMES;
+                            tx_channel.transmit(&ir_tx_data).await.unwrap();
                         }
                     }
                     ServerData::SetID(new_id) => {
@@ -350,10 +340,6 @@ async fn drive(
                 motor_right.set_velocity(0.0);
                 motor_left.set_velocity(0.0);
             }
-        }
-        if shot_times > 0 {
-            tx_channel.transmit(&ir_tx_data).await.unwrap();
-            shot_times -= 1;
         }
     }
 }
