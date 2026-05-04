@@ -11,7 +11,7 @@ const MAIN_CSS: Asset = asset!("/assets/main.css");
 const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
 
 const TIMER_MAX: f32 = 180.0;
-const RELOAD_INC: f32 = 10.0;
+const RELOAD_INC: f32 = 5.0;
 
 fn main() {
     dioxus::launch(App);

@@ -209,7 +209,7 @@ async fn main(spawner: Spawner) -> ! {
         .spawn(monitor(stack, wifi_controller, interval, &ID, &HIT_ID))
         .unwrap();
 
-    spawner.spawn(recv_ir(rx_channel, &HIT_ID)).unwrap();
+    spawner.spawn(recv_ir(rx_channel, &HIT_ID, &ID)).unwrap();
 
     loop {
         Timer::after_secs(3600).await;
@@ -222,26 +222,24 @@ async fn start_wifi(mut runner: Runner<'static, esp_radio::wifi::WifiDevice<'sta
 }
 
 #[embassy_executor::task]
-async fn recv_ir(mut rx_channel: Channel<'static, Async, Rx>, hit_id: &'static AtomicU8) {
-
+async fn recv_ir(mut rx_channel: Channel<'static, Async, Rx>, hit_id: &'static AtomicU8, id: &'static OnceLock<u8>) {
     loop {
         let mut rx_data = [PulseCode::end_marker(); 5];
 
         match rx_channel.receive(&mut rx_data).await {
             Ok(l) => {
                 println!("{l} {:?}", rx_data);
-                if l == 3 {
-                    let mut flag = true;
-                    for i in 0..3 {
-                        if check_length(rx_data[i].length1()) || check_length(rx_data[i].length1())
-                        {
-                            flag = false;
-                            break;
-                        }
+                let mut c = 0;
+                for i in 0..l {
+                    if check_length(rx_data[i].length1()) || check_length(rx_data[i].length1()) {
+                        c = 0;
+                        break;
                     }
-                    if flag {
-                        hit_id.fetch_add(1, Ordering::Relaxed);
-                    }
+                    c += 1;
+                }
+                if (3 <= c && c <= 4) && (c - 2) != *id.get().await {
+                    println!("HIT");
+                    hit_id.fetch_add(1, Ordering::Relaxed);
                 }
             }
             Err(_) => {
@@ -290,8 +288,8 @@ async fn drive(
 
     let mut shot_id = 0u8;
 
-    let mut ir_tx_data = [PulseCode::new(Level::High, 1000, Level::Low, 1000); 4];
-    ir_tx_data[3] = PulseCode::end_marker();
+    let mut ir_tx_data = [PulseCode::new(Level::High, 1000, Level::Low, 1000); 5];
+    ir_tx_data[4] = PulseCode::end_marker();
 
     loop {
         yield_now().await;
@@ -329,6 +327,9 @@ async fn drive(
                         println!("ID: {new_id}");
                         if !id.is_set() {
                             id.init(new_id).unwrap();
+                            if new_id == 1 {
+                                ir_tx_data[3] = PulseCode::end_marker();
+                            }
                         }
                         shot_id = 0;
                     }
