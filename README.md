@@ -1,86 +1,104 @@
-# Laser Tank
 
-Laser Tank は、Rustで構築された2人プレイ用のレーザータグ戦車ゲームです。物理的な戦車を中央サーバーを介して制御し、Wi-Fi (UDP) 経由で通信を行います。
+# レーザータンク
 
-## プロジェクト構成
+![レーザータンク](Tanks.jpg)
 
-このリポジトリはCargoワークスペースとして構成されており、主に3つのコンポーネントから成り立っています：
+Rustで構築された、ハードウェア（ESP32）とPC上のゲームサーバー（Dioxus）が連携する2人プレイ用戦車ゲームです。
+組み込みからGUI、通信プロトコルに至るまで、システム全体を **Rust** で統一して開発しています。
 
-- **`communication`**: サーバーと戦車間の通信に使用されるプロトコルやデータ構造を定義した共有ライブラリです（`postcard` と `serde` でシリアライズされています）。
-- **`dx`**: DioxusベースのGUIサーバーアプリケーションです。ゲームロジックの管理、`gilrs`を使ったゲームパッド入力の処理、プレイヤーのステータス（残機、リロード時間、接続状態）の表示を行い、UDP経由でESP32の戦車と通信します。また、効果音の再生も行います。
-- **`esp32`**: ESP32マイコン上で動作する戦車側のファームウェアです。`esp-hal` と `embassy` 非同期ランタイムを使用しています。モーター制御 (PWM)、着弾判定のための赤外線 (IR) 送受信 (RMT)、およびサーバーとのWi-Fi/UDP通信を処理します。
+---
 
-## システムアーキテクチャ
+## ハードウェア仕様 (Hardware)
+### 使用部品
+* **MCU:** ESP32-WROOM-32E (またはお手持ちのボード)
+* **モータードライバ:** [型番]
+* **赤外線送信:** 赤外線LED
+* **赤外線受信:** [型番]
 
 ```mermaid
 graph TD
-    subgraph Server["サーバー (PC / Dioxus App)"]
-        UI["GUI (Dioxus)"]
-        Logic["ゲームロジック & タイマー"]
-        Gamepad["ゲームパッド入力 (Gilrs)"]
-        UDP_S["UDP ソケット"]
-        
-        UI <--> Logic
-        Gamepad --> Logic
-        Logic <--> UDP_S
+  %% communication モジュール
+  subgraph communication
+    comm_ServerData["ServerData enum\n- Controller(ControllerState)\n- SetID(u8)"]
+    comm_ControllerState["ControllerState struct\n- stick: (i8, i8)\n- shot_id: u8\n- Default"]
+    comm_RobotRespond["RobotRespond struct\n- robot_id: u8\n- hit_id: u8"]
+    comm_detect["detect_id_change(now: &mut u8, received: u8) -> bool"]
+  end
+
+  %% dx の UI と logic
+  subgraph dx
+    subgraph "dx main (dx/src/main.rs)"
+      main_fn["main() -> dioxus::launch(App)"]
+      App_comp["App component\n- use_signal / use_future / use_coroutine\n- UI: timer, players, buttons"]
+      PlayerArea_comp["PlayerArea component\n- レンダリング専用"]
+      SINK["SINK_HANDLE (audio)"]
+      logic_coroutine_node["logic_coroutine (use_coroutine)\n- receives ToRobot commands from UI coroutine"]
     end
 
-    subgraph Tank["ESP32 Tank"]
-        UDP_T["UDP クライアント"]
-        Motor["モーター制御 (MCPWM)"]
-        IR_Tx["赤外線 送信 (RMT)"]
-        IR_Rx["赤外線 受信 (RMT)"]
-        
-        UDP_T --> Motor
-        UDP_T --> IR_Tx
-        IR_Rx --> UDP_T
+    subgraph "dx logic (dx/src/logic.rs)"
+      logic_init["init() -> returns channels (to_robot_tx, to_server_rx)"]
+      enum_ToServer["ToServer enum\n- Connect, Disconnect, Hit, AskShot"]
+      enum_ToRobot["ToRobot enum\n- AllowShot, Stop, Start"]
+      controller_handler_fn["controller_handler task (async)\n- reads gamepad via gilrs\n- button -> send AskShot to to_server_tx"]
+      robot_handler_fn["robot_handler task (async)\n- binds UDP socket\n- recv RobotRespond, manage handlers[2]\n- ticker -> send controller data\n- consumes to_robot_rx"]
+      RobotHandler_class["RobotHandler struct\n- fields: robot_id, hit_id, recv_addr, send_addr, socket, controller\n- methods: notify_id(), recv_heartbeat(), send_controller_data(stop_flag)"]
     end
+  end
 
-    %% Network Connections
-    UDP_S <-->|"WiFi (UDP)"| UDP_T
-    
-    %% Physical Interactions
-    IR_Tx -.->|"赤外線信号 (ループバック)"| IR_Rx
-```
+  %% esp32 側（組み込み）
+  subgraph esp32
+    esp_lib["lib.rs\n- pub mod motor;"]
+    motor_mod["motor.rs"]
+    motor_Motor["Motor struct (embedded)\n- fields: pin (PWM), phase (GPIO)\n- methods: new(pin, phase), set_velocity(v: f32)\n- depends on esp_hal (GPIO, MCPWM)"]
+    esp_hal["esp_hal (HAL for PWM/GPIO)"]
+  end
 
-## 主な機能
+  %% チャネル / ノード定義（特殊文字回避）
+  to_robot_tx["to_robot_tx (Sender u8-ToRobot)"]
+  to_server_rx["to_server_rx (Receiver u8-ToServer)"]
+  to_server_tx["to_server_tx (internal Sender)"]
+  gilrs_gamepad["gilrs (gamepad)"]
+  UDP_Robot["Robot device (UDP) - sends RobotRespond / receives ServerData"]
 
-- **リアルタイム制御:** サーバーに接続されたゲームパッドを使用して戦車を操作します。
-- **着弾判定:** 赤外線 (IR) の送信機と受信機を使用し、対戦相手からの攻撃（着弾）を検知します。
-- **動的 UI:** Dioxus製のレスポンシブなGUIにより、接続状況、残機、リロードタイマーなどのリアルタイムな統計情報を表示します。
-- **非同期ファームウェア:** `embassy` を用いた堅牢なESP32ファームウェアにより、ネットワーク、モーター制御、センサーの読み取りを並行して実行します。
+  %% 主要ノード間の関係
+  App_comp -->|starts coroutine| logic_coroutine_node
+  App_comp -->|UI sends control| logic_coroutine_node
+  logic_coroutine_node -->|calls init| logic_init
+  logic_init --> controller_handler_fn
+  logic_init --> robot_handler_fn
 
-## セットアップと実行方法
+  logic_init -->|provides| to_robot_tx
+  logic_init -->|provides| to_server_rx
 
-### 必要なもの
+  controller_handler_fn -->|reads| gilrs_gamepad
+  controller_handler_fn -->|sends AskShot| to_server_tx
+  to_server_tx -->|feeds into| to_server_rx
 
-- Rust ツールチェーン
-- ファームウェアのビルドに必要な ESP-IDF / `esp-hal` の依存関係
-- ゲームパッド（プレイヤー入力用）
+  robot_handler_fn --> RobotHandler_class
+  RobotHandler_class -->|uses| comm_detect
+  robot_handler_fn -->|serializes ServerData| comm_ServerData
+  robot_handler_fn -->|parses RobotRespond| comm_RobotRespond
 
-### 環境変数
+  robot_handler_fn -->|send ServerData UDP| UDP_Robot
+  UDP_Robot -->|heartbeat / RobotRespond| robot_handler_fn
 
-プロジェクトのルートに以下のキーを含む `.env` ファイルを作成してください：
+  UDP_Robot -->|embedded firmware may call| motor_Motor
+  motor_Motor --> esp_hal
 
-```env
-RECEIVE_PORT="[RECEIVE_PORT]"
-SEND_PORT="[SEND_PORT]"
-SERVER_IP="[IP_ADDRESS]"
-INTERVAL="50"
-SSID="[YourWiFiSSID]"
-PASSWORD="[YourWiFiPassword]"
-```
+  logic_coroutine_node -->|sends ToRobot commands| to_robot_tx
+  to_robot_tx -->|consumed by| robot_handler_fn
 
-### サーバーの実行
+  %% タスクの視覚化（非同期タスク）
+  subgraph tasks["async tasks / coroutines"]
+    t_controller["Task: controller_handler"]
+    t_robot["Task: robot_handler"]
+    t_ui_timer["Task: UI timer future (use_future)"]
+    t_coroutine["Task: UI coroutine (use_coroutine)"]
+  end
 
-```bash
-cd dx
-dx serve
-```
-
-### ESP32ファームウェアの書き込み
-
-```bash
-cd esp32
-cargo run --release
+  t_controller -->|"to_server (AskShot)"| to_server_tx
+  to_server_rx -->|"events (Connect/Disconnect/Hit/AskShot)"| logic_coroutine_node
+  t_coroutine -->|sends ToRobot| to_robot_tx
+  t_robot -->|manages handlers| RobotHandler_class
+  t_ui_timer -->|updates UI signals| App_comp
 ```
