@@ -314,14 +314,10 @@ fn App() -> Element {
                                     let start_wav = BufReader::new(File::open("assets/321 start.wav").unwrap());
                                     let _player = rodio::play(SINK_HANDLE.mixer(), start_wav);
                                     sleep(Duration::from_millis(1250)).await;
-                                    countdown_text.set("3".to_string());
-                                    sleep(Duration::from_secs(1)).await;
-                                    countdown_text.set("2".to_string());
-                                    sleep(Duration::from_secs(1)).await;
-                                    countdown_text.set("1".to_string());
-                                    sleep(Duration::from_secs(1)).await;
-                                    countdown_text.set("START!".to_string());
-                                    sleep(Duration::from_secs(1)).await;
+                                    for i in ["3", "2", "1", "START!"]{
+                                        countdown_text.set(i.to_string());
+                                        sleep(Duration::from_secs(1)).await;
+                                    }
                                     logic_coroutine.send(logic::ToRobot::Start);
 
                                     countdown_text.set("".to_string());

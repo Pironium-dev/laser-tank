@@ -188,12 +188,6 @@ async fn main(spawner: Spawner) -> ! {
 
     static HIT_ID: AtomicU8 = AtomicU8::new(0);
 
-    /*
-    task1 socketのコントロール、udp送信
-    task2 udp送信、rmt受信、つぎに送信する内容の一時記録
-    task3 udp受信、機体操作
-    */
-
     spawner
         .spawn(drive(
             stack,
@@ -223,6 +217,7 @@ async fn start_wifi(mut runner: Runner<'static, esp_radio::wifi::WifiDevice<'sta
 
 #[embassy_executor::task]
 async fn recv_ir(mut rx_channel: Channel<'static, Async, Rx>, hit_id: &'static AtomicU8, id: &'static OnceLock<u8>) {
+    // IR信号を受信、処理する
     loop {
         let mut rx_data = [PulseCode::end_marker(); 5];
 
@@ -263,6 +258,7 @@ async fn drive(
     interval: u64,
     id: &'static OnceLock<u8>,
 ) {
+    // UDP信号の受信をし、車体を動かす。車体idも書き込む
     let interval = Duration::from_millis(interval * 10);
 
     let mut rx_buffer = [0 as u8; 1024 * 2];
@@ -359,6 +355,7 @@ async fn monitor(
     id: &'static OnceLock<u8>,
     hit_id: &'static AtomicU8,
 ) {
+    // Wifiがつながっているかの確認、heartbeatの送信を行う
     let mut ip_address = [0; 4];
     for (i, s) in SERVER_IP.split(".").enumerate() {
         ip_address[i] = s.parse().unwrap();
