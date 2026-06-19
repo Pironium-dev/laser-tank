@@ -257,11 +257,7 @@ impl RobotHandler {
             if stop_flag {
                 controller.stick = (0, 0);
             }
-            to_slice(
-                &communication::ServerData::Controller(controller),
-                &mut buf,
-            )
-            .unwrap()
+            to_slice(&communication::ServerData::Controller(controller), &mut buf).unwrap()
         };
         self.socket.send_to(data, self.send_addr).await.unwrap();
     }

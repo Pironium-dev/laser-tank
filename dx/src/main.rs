@@ -1,10 +1,10 @@
+use rodio;
 use std::fs::File;
 use std::io::BufReader;
 use std::sync::LazyLock;
-use rodio;
 
 use dioxus::prelude::*;
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 mod logic;
 
 const MAIN_CSS: Asset = asset!("/assets/main.css");
@@ -109,11 +109,11 @@ fn App() -> Element {
     let p2_connected = use_signal(|| false);
     let mut p2_lives = use_signal(|| 3);
     let mut p2_reload = use_signal(|| 100.0);
-    
+
     let mut countdown_text = use_signal(|| "".to_string());
     let mut is_counting_down = use_signal(|| false);
     let mut is_fullscreen = use_signal(|| false);
-    
+
     use_future(move || async move {
         loop {
             sleep(Duration::from_millis(100)).await;
@@ -129,7 +129,7 @@ fn App() -> Element {
                     });
                 }
             }
-            
+
             if *p1_reload.read() < 100.0 {
                 *p1_reload.write() += RELOAD_INC;
                 if *p1_reload.read() > 100.0 {
@@ -144,12 +144,11 @@ fn App() -> Element {
             }
         }
     });
-    
+
     // 音関連
-    
-    static SINK_HANDLE: LazyLock<rodio::stream::MixerDeviceSink> = LazyLock::new(|| {
-        rodio::DeviceSinkBuilder::open_default_sink().unwrap()
-    });
+
+    static SINK_HANDLE: LazyLock<rodio::stream::MixerDeviceSink> =
+        LazyLock::new(|| rodio::DeviceSinkBuilder::open_default_sink().unwrap());
 
     let logic_coroutine;
 
@@ -158,72 +157,74 @@ fn App() -> Element {
         let mut p2_connected = p2_connected.clone();
         let mut p1_lives = p1_lives.clone();
         let mut p2_lives = p2_lives.clone();
-        
-        logic_coroutine = use_coroutine(move |mut rx: UnboundedReceiver<logic::ToRobot>| async move {
-            let (to_robot_tx, mut to_server_rx) = logic::init();
-            loop {
-                tokio::select! {
-                    x = rx.recv() => {
-                        match x.unwrap() {
-                            logic::ToRobot::Stop => {
-                                to_robot_tx.send((0, logic::ToRobot::Stop)).await.unwrap();
-                            }
-                            logic::ToRobot::Start => {
-                                to_robot_tx.send((0, logic::ToRobot::Start)).await.unwrap();
-                            }
-                            _ => {}
-                        }
-                    }
-                    x = to_server_rx.recv() => {
-                        match x {
-                            Some(msg) => {
-                                match msg.1 {
-                                    logic::ToServer::Connect => {
-                                        if msg.0 == 1 {
-                                            p1_connected.set(true);
-                                        } else if msg.0 == 2 {
-                                            p2_connected.set(true);
-                                        }
-                                    },
-                                    logic::ToServer::Disconnect => {
-                                        if msg.0 == 1 {
-                                            p1_connected.set(false);
-                                        } else if msg.0 == 2 {
-                                            p2_connected.set(false);
-                                        }
-                                    },
-                                    logic::ToServer::Hit => {
-                                        if msg.0 == 1 && *p1_lives.read() > 0 {
-                                            *p1_lives.write() -= 1;
-                                            if *p1_lives.read() == 0 {
-                                                timer.set(0.0);
-                                            }
-                                        } else if msg.0 == 2 && *p2_lives.read() > 0 {
-                                            *p2_lives.write() -= 1;
-                                            if *p2_lives.read() == 0 {
-                                                timer.set(0.0);
-                                            }
-                                        }
-                                    },
-                                    logic::ToServer::AskShot => {
-                                        if msg.0 == 1 && *p1_reload.read() >= 100.0 {
-                                            *p1_reload.write() = 0.0;
-                                            to_robot_tx.send((1, logic::ToRobot::AllowShot)).await.unwrap();
-                                        } else if msg.0 == 2 && *p2_reload.read() >= 100.0 {
-                                            *p2_reload.write() = 0.0;
-                                            to_robot_tx.send((2, logic::ToRobot::AllowShot)).await.unwrap();
-                                        }
-                                    },
+
+        logic_coroutine = use_coroutine(
+            move |mut rx: UnboundedReceiver<logic::ToRobot>| async move {
+                let (to_robot_tx, mut to_server_rx) = logic::init();
+                loop {
+                    tokio::select! {
+                        x = rx.recv() => {
+                            match x.unwrap() {
+                                logic::ToRobot::Stop => {
+                                    to_robot_tx.send((0, logic::ToRobot::Stop)).await.unwrap();
                                 }
-                            },
-                            None => {
-                                break;
+                                logic::ToRobot::Start => {
+                                    to_robot_tx.send((0, logic::ToRobot::Start)).await.unwrap();
+                                }
+                                _ => {}
+                            }
+                        }
+                        x = to_server_rx.recv() => {
+                            match x {
+                                Some(msg) => {
+                                    match msg.1 {
+                                        logic::ToServer::Connect => {
+                                            if msg.0 == 1 {
+                                                p1_connected.set(true);
+                                            } else if msg.0 == 2 {
+                                                p2_connected.set(true);
+                                            }
+                                        },
+                                        logic::ToServer::Disconnect => {
+                                            if msg.0 == 1 {
+                                                p1_connected.set(false);
+                                            } else if msg.0 == 2 {
+                                                p2_connected.set(false);
+                                            }
+                                        },
+                                        logic::ToServer::Hit => {
+                                            if msg.0 == 1 && *p1_lives.read() > 0 && *is_playing.read() {
+                                                *p1_lives.write() -= 1;
+                                                if *p1_lives.read() == 0 {
+                                                    timer.set(0.0);
+                                                }
+                                            } else if msg.0 == 2 && *p2_lives.read() > 0 && *is_playing.read() {
+                                                *p2_lives.write() -= 1;
+                                                if *p2_lives.read() == 0 {
+                                                    timer.set(0.0);
+                                                }
+                                            }
+                                        },
+                                        logic::ToServer::AskShot => {
+                                            if msg.0 == 1 && *p1_reload.read() >= 100.0 {
+                                                *p1_reload.write() = 0.0;
+                                                to_robot_tx.send((1, logic::ToRobot::AllowShot)).await.unwrap();
+                                            } else if msg.0 == 2 && *p2_reload.read() >= 100.0 {
+                                                *p2_reload.write() = 0.0;
+                                                to_robot_tx.send((2, logic::ToRobot::AllowShot)).await.unwrap();
+                                            }
+                                        },
+                                    }
+                                },
+                                None => {
+                                    break;
+                                }
                             }
                         }
                     }
                 }
-            }
-        });
+            },
+        );
     }
 
     let timer_percentage = (timer() / TIMER_MAX) * 100.0;
@@ -251,7 +252,7 @@ fn App() -> Element {
             header {
                 class: "text-center py-4 bg-gray-800 shadow-lg z-10 border-b border-gray-700 relative",
                 h1 { class: "text-[clamp(1.5rem,3vw,2.5rem)] font-bold text-blue-400 tracking-wider drop-shadow-[0_0_10px_rgba(96,165,250,0.5)]", "LASER TANK BATTLE" }
-                
+
                 button {
                     class: "absolute right-6 top-1/2 -translate-y-1/2 p-3 bg-gray-700 hover:bg-gray-600 rounded-lg text-white font-bold transition-all shadow-[0_0_10px_rgba(0,0,0,0.3)]",
                     onclick: move |_| {
@@ -307,7 +308,7 @@ fn App() -> Element {
                                 *p1_lives.write() = 3;
                                 *p2_lives.write() = 3;
                                 timer.set(TIMER_MAX);
-                                
+
                                 spawn(async move {
                                     logic_coroutine.send(logic::ToRobot::Stop);
                                     let start_wav = BufReader::new(File::open("assets/321 start.wav").unwrap());
@@ -322,7 +323,7 @@ fn App() -> Element {
                                     countdown_text.set("START!".to_string());
                                     sleep(Duration::from_secs(1)).await;
                                     logic_coroutine.send(logic::ToRobot::Start);
-                                    
+
                                     countdown_text.set("".to_string());
                                     is_counting_down.set(false);
                                     is_playing.set(true);
